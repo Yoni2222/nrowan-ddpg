@@ -44,19 +44,16 @@ from agent.ddpg_agent import DDPGAgent
 from agent.memory import ReplayBuffer
 
 def get_save_paths():
-    """Detects if running on Google Colab and returns the appropriate paths to Google Drive."""
-    try:
-        import google.colab
-        from google.colab import drive
-        print("Google Colab detected. Mounting Google Drive...")
-        drive.mount('/content/drive', force_remount=True)
-        
-        # Base directory in your Google Drive
-        base_dir = '/content/drive/MyDrive/NROWAN_DDPG_Project/'
+    """Detects if Google Drive is mounted and returns the appropriate paths."""
+    colab_drive_path = '/content/drive/MyDrive/'
+    
+    if os.path.exists(colab_drive_path):
+        print("Google Drive detection: SUCCESS. Training data will sync to cloud.")
+        base_dir = os.path.join(colab_drive_path, 'NROWAN_DDPG_Project')
         models_dir = os.path.join(base_dir, 'saved_models')
         results_dir = os.path.join(base_dir, 'results')
-    except ImportError:
-        print("Running locally. Saving to local project directory...")
+    else:
+        print("Google Drive detection: NOT FOUND. Saving to local project directory...")
         models_dir = "saved_models"
         results_dir = "results"
         
