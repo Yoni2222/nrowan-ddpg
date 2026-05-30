@@ -133,14 +133,23 @@ def main():
             # Take a step in the environment
             next_obs, reward, done, info = env.step(g2op_action)
             next_state = extract_state(next_obs)
-            
-            # --- SAFETY TRACKER --- #
-            safe_rho = np.nan_to_num(next_obs.rho, nan=0.0)
-            if np.any(safe_rho >= 1.0):
-                ep_violations += 1
-            # ---------------------- #
 
-            # Store experience in memory
+            # --- SAFETY TRACKER & REWARD SHAPING --- #
+            safe_rho = np.nan_to_num(next_obs.rho, nan=0.0)
+            max_rho = np.max(safe_rho)
+
+            # Track hard constraints violations for our analysis plots
+            if max_rho >= 1.0:
+                ep_violations += 1
+
+            # Penalize the agent proportionally if any line exceeds 80% capacity
+            # This guides the gradient smoothly before a total collapse occurs
+            if max_rho > 0.8:
+                penalty = (max_rho - 0.8) * 10.0
+                reward -= penalty
+            # ---------------------------------------- #
+
+            # Store the modified, safety-guided reward into the experience replay
             replay_buffer.add(state, flat_action, reward, next_state, done)
             
             # Train the agent
