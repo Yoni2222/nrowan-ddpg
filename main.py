@@ -62,8 +62,8 @@ def main():
     print("Initializing Grid2Op environment...")
     env = grid2op.make("rte_case14_realistic")
     
-    # --- FIX: Shuffle chronics to break the 1000-episode repetitive loop --- #
-    env.chronics_handler.set_chronics_order_random()
+    # Extract total number of historical weeks available in this dataset
+    num_chronics = env.chronics_handler.max_int()
     
     # Determine dimensions
     dummy_obs = env.reset()
@@ -76,7 +76,7 @@ def main():
     replay_buffer = ReplayBuffer(state_dim, action_dim)
 
     # Production Hyperparameters for Google Colab GPU
-    MAX_EPISODES = 2000      # Target number of episodes for comprehensive training
+    MAX_EPISODES = 4000      # Optimized from 2000 to fully ensure convergence with NROWAN
     MAX_STEPS = 100         # Max steps per episode
     BATCH_SIZE = 64
 
@@ -88,6 +88,12 @@ def main():
     
     # 3. The Main Training Loop
     for episode in tqdm(range(MAX_EPISODES), desc="Training Progress"):
+        
+        # --- FIXED: Manually sample a random scenario index to break the 1000-episode loop --- #
+        random_chronic_idx = np.random.randint(0, num_chronics)
+        env.chronics_handler.tell_id(random_chronic_idx)
+        # ------------------------------------------------------------------------------------ #
+        
         obs = env.reset()
         state = extract_state(obs)
         
