@@ -63,7 +63,7 @@ def main():
     env = grid2op.make("rte_case14_realistic")
     
     # --- FIX: Shuffle chronics to break the 1000-episode repetitive loop --- #
-    env.set_chronics_order_random()
+    env.chronics_handler.set_chronics_order_random()
     
     # Determine dimensions
     dummy_obs = env.reset()
