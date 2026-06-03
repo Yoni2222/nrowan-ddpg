@@ -14,7 +14,7 @@ class DDPGAgent:
         # Initialize Actor
         self.actor = Actor(state_dim, action_dim, max_action).to(self.device)
         self.actor_target = copy.deepcopy(self.actor)
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=3e-4)
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-3)
 
         # Initialize Critic
         self.critic = Critic(state_dim, action_dim).to(self.device)
@@ -23,7 +23,7 @@ class DDPGAgent:
         
         # Initialize NROWAN Parameter Noise Mechanism
         # The initial_std dictates how aggressive the exploration is at the start
-        self.noise_model = NROWANParameterNoise(initial_std=0.1)
+        self.noise_model = NROWANParameterNoise(initial_std=0.1, decay_rate=0.998)
 
         self.max_action = max_action
         self.state_dim = state_dim

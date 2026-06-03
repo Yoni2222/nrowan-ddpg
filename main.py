@@ -62,6 +62,9 @@ def main():
     print("Initializing Grid2Op environment...")
     env = grid2op.make("rte_case14_realistic")
     
+    # --- FIX: Shuffle chronics to break the 1000-episode repetitive loop --- #
+    env.set_chronics_order_random()
+    
     # Determine dimensions
     dummy_obs = env.reset()
     state_dim = extract_state(dummy_obs).shape[0]  # Should be 36
@@ -73,7 +76,7 @@ def main():
     replay_buffer = ReplayBuffer(state_dim, action_dim)
 
     # Production Hyperparameters for Google Colab GPU
-    MAX_EPISODES = 4000      # Target number of episodes for comprehensive training
+    MAX_EPISODES = 2000      # Target number of episodes for comprehensive training
     MAX_STEPS = 100         # Max steps per episode
     BATCH_SIZE = 64
 
