@@ -76,7 +76,7 @@ def main():
     replay_buffer = ReplayBuffer(state_dim, action_dim)
 
     # Production Hyperparameters for Google Colab GPU
-    MAX_EPISODES = 4000      # Optimized from 2000 to fully ensure convergence with NROWAN
+    MAX_EPISODES = 2000      # Optimized from 2000 to fully ensure convergence with NROWAN
     MAX_STEPS = 100         # Max steps per episode
     BATCH_SIZE = 64
 
