@@ -83,6 +83,8 @@ def main():
     # Trackers for our plots
     episode_rewards = []
     episode_safety_violations = []
+    actor_losses = []
+    critic_losses = []
 
     print(f"\nStarting Training Loop for {MAX_EPISODES} episodes on {agent.device}...")
     
@@ -130,8 +132,9 @@ def main():
             
             # Train the agent
             if replay_buffer.size > BATCH_SIZE:
-                agent.train(replay_buffer, BATCH_SIZE)
-                
+                c_loss, a_loss = agent.train(replay_buffer, BATCH_SIZE)
+                critic_losses.append(c_loss)
+                actor_losses.append(a_loss)
             state = next_state
             ep_reward += reward
             
@@ -156,6 +159,10 @@ def main():
     np.savetxt(os.path.join(results_dir, "raw_rewards.txt"), episode_rewards)
     np.savetxt(os.path.join(results_dir, "raw_violations.txt"), episode_safety_violations)
     
+    np.savetxt(os.path.join(results_dir, "raw_rewards.txt"), episode_rewards)
+    np.savetxt(os.path.join(results_dir, "raw_violations.txt"), episode_safety_violations)
+    np.savetxt(os.path.join(results_dir, "critic_losses.txt"), critic_losses)
+    np.savetxt(os.path.join(results_dir, "actor_losses.txt"), actor_losses)
     # Generate plots
     plot_and_save_metrics(episode_rewards, episode_safety_violations, results_dir)
 
