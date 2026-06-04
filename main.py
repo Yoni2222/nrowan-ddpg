@@ -76,11 +76,11 @@ def main():
     replay_buffer = ReplayBuffer(state_dim, action_dim)
 
     # Production Hyperparameters for Google Colab GPU
-    MAX_EPISODES = 2000      # Set strictly to 2000 episodes as requested
+    MAX_EPISODES = 2000      # Set strictly to 2000 episodes
     MAX_STEPS = 100         # Max steps per episode
     BATCH_SIZE = 64
 
-    # Trackers for our plots
+    # Trackers for our plots and diagnostics
     episode_rewards = []
     episode_safety_violations = []
     actor_losses = []
@@ -91,11 +91,9 @@ def main():
     # 3. The Main Training Loop
     for episode in tqdm(range(MAX_EPISODES), desc="Training Progress"):
         
-        # --- THE ABSOLUTE FIX: Cycle to the next shuffled chronic seamlessly --- #
-        # First episode relies on initial reset, subsequent episodes advance automatically
-        if episode > 0:
-            env.step_to_next_chronic()
-        # ------------------------------------------------------------------------ #
+        # --- FIXED: Use internal IDs modulo 1000 dynamically to cycle through shuffled disk folders --- #
+        env.set_id(episode % 1000)
+        # ---------------------------------------------------------------------------------------------- #
         
         obs = env.reset()
         state = extract_state(obs)
@@ -121,7 +119,6 @@ def main():
                 ep_violations += 1
 
             # Penalize the agent proportionally if any line exceeds 80% capacity
-            # This guides the gradient smoothly before a total collapse occurs
             if max_rho > 0.8:
                 penalty = (max_rho - 0.8) * 10.0
                 reward -= penalty
@@ -130,11 +127,12 @@ def main():
             # Store the modified, safety-guided reward into the experience replay
             replay_buffer.add(state, flat_action, reward, next_state, done)
             
-            # Train the agent
+            # Train the agent and capture backpropagation losses
             if replay_buffer.size > BATCH_SIZE:
                 c_loss, a_loss = agent.train(replay_buffer, BATCH_SIZE)
                 critic_losses.append(c_loss)
                 actor_losses.append(a_loss)
+                
             state = next_state
             ep_reward += reward
             
@@ -158,11 +156,9 @@ def main():
     # Save raw arrays
     np.savetxt(os.path.join(results_dir, "raw_rewards.txt"), episode_rewards)
     np.savetxt(os.path.join(results_dir, "raw_violations.txt"), episode_safety_violations)
-    
-    np.savetxt(os.path.join(results_dir, "raw_rewards.txt"), episode_rewards)
-    np.savetxt(os.path.join(results_dir, "raw_violations.txt"), episode_safety_violations)
     np.savetxt(os.path.join(results_dir, "critic_losses.txt"), critic_losses)
     np.savetxt(os.path.join(results_dir, "actor_losses.txt"), actor_losses)
+    
     # Generate plots
     plot_and_save_metrics(episode_rewards, episode_safety_violations, results_dir)
 
