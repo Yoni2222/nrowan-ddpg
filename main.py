@@ -55,8 +55,6 @@ def main():
     print("Initializing Grid2Op environment...")
     env = grid2op.make("rte_case14_realistic")
     
-    env.chronics_handler.shuffle()
-    
     dummy_obs = env.reset()
     state_dim = extract_state(dummy_obs).shape[0]  
     action_dim = env.n_gen                         
@@ -78,7 +76,12 @@ def main():
     
     for episode in tqdm(range(MAX_EPISODES), desc="Training Progress"):
         
-        env.set_id(episode % 1000)
+        # --- THE REAL UNBREAKABLE FIX: Force absolute uniform randomness on every episode --- #
+        # We sample a completely random folder index from 0 to 999 independently every time.
+        # This completely bypasses Grid2Op's internal sequential loops.
+        random_chronic_idx = int(np.random.randint(0, 1000))
+        env.set_id(random_chronic_idx)
+        # ------------------------------------------------------------------------------------ #
         
         obs = env.reset()
         state = extract_state(obs)
@@ -100,8 +103,6 @@ def main():
             if max_rho >= 1.0:
                 ep_violations += 1
 
-            # --- PROTECTION B: Reward Scaling & Hard Clipping ---
-            # Standardize rewards to a safe interval to prevent mathematical explosion
             if max_rho > 0.8:
                 penalty = (max_rho - 0.8) * 10.0
                 reward -= penalty
