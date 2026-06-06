@@ -56,19 +56,39 @@ def main():
     env = grid2op.make("rte_case14_realistic")
     
     dummy_obs = env.reset()
-    state_dim = extract_state(dummy_obs).shape[0]  
-    action_dim = env.n_gen                         
-    max_action = 10.0                              
+    state_dim = extract_state(dummy_obs).shape[0]
 
-    agent = DDPGAgent(state_dim, action_dim, max_action)
+    # --- ACTION SPACE FIX --- #
+    # Only generators flagged redispatchable can be controlled. Setting redispatch
+    # on a non-redispatchable generator makes the whole action AMBIGUOUS, so
+    # Grid2Op discards it and applies do-nothing -> the agent had zero effect.
+    redisp_mask = np.asarray(env.gen_redispatchable, dtype=bool)
+    ramp_up = np.asarray(env.gen_max_ramp_up, dtype=np.float32)
+    action_dim = int(np.sum(redisp_mask))   # control ONLY redispatchable generators
+    max_action = 1.0                         # actor outputs [-1, 1]; scaled by ramp below
+    print(f"Controllable (redispatchable) generators: {action_dim} / {env.n_gen}")
+
+    # --- NROWAN hyperparameters (tune these to match the paper) ---
+    # sigma_init: initial exploration noise level inside the noisy layers.
+    # xi_max: upper bound on the noise-reduction weight. If the D term dominates
+    #         the actor loss (watch the printed [policy vs xi*D] split), lower it.
+    SIGMA_INIT = 0.5
+    XI_MAX = 5.0
+
+    agent = DDPGAgent(state_dim, action_dim, max_action,
+                      sigma_init=SIGMA_INIT, xi_max=XI_MAX)
     replay_buffer = ReplayBuffer(state_dim, action_dim)
 
-    MAX_EPISODES = 2000      
-    MAX_STEPS = 100         
-    BATCH_SIZE = 64
+    MAX_EPISODES = 2000
+    MAX_STEPS = 100
+    BATCH_SIZE = 128
+    LOG_EVERY = 50           # print a diagnostics summary every N episodes
 
     episode_rewards = []
     episode_safety_violations = []
+    episode_ambiguous = []   # ambiguous-action count per episode (should be ~0)
+    xi_history = []          # NROWAN noise-reduction weight per episode
+    noise_history = []       # NROWAN noise magnitude D per episode
     actor_losses = []
     critic_losses = []
 
@@ -88,13 +108,25 @@ def main():
         
         ep_reward = 0
         ep_violations = 0
-        
+        ep_ambiguous = 0
+
         for step in range(MAX_STEPS):
             flat_action = agent.select_action(state, explore=True)
-            g2op_action = env.action_space({"redispatch": flat_action})
+
+            # Scatter the controlled actions into a full redispatch vector and
+            # scale each by that generator's ramp limit (MW). Non-redispatchable
+            # generators stay at 0 so the action is never ambiguous.
+            full_redispatch = np.zeros(env.n_gen, dtype=np.float32)
+            full_redispatch[redisp_mask] = flat_action * ramp_up[redisp_mask]
+            g2op_action = env.action_space({"redispatch": full_redispatch})
             
             next_obs, reward, done, info = env.step(g2op_action)
             next_state = extract_state(next_obs)
+
+            # DIAGNOSTIC: did Grid2Op reject the action? After the fix this
+            # should stay ~0. If it spikes, the redispatch is still illegal.
+            if info.get("is_ambiguous", False) or info.get("is_illegal", False):
+                ep_ambiguous += 1
 
             # --- SAFETY TRACKER & REWARD SHAPING --- #
             safe_rho = np.nan_to_num(next_obs.rho, nan=0.0)
@@ -126,7 +158,27 @@ def main():
                 
         episode_rewards.append(ep_reward)
         episode_safety_violations.append(ep_violations)
-        agent.noise_model.decay_noise()
+        episode_ambiguous.append(ep_ambiguous)
+
+        # NROWAN Online Weight Adjustment: update xi (the noise-reduction weight)
+        # from this episode's performance. As the policy improves, xi grows and
+        # the learned exploration noise is driven down.
+        xi = agent.update_noise_weight(ep_reward)
+        noise_mag = agent.noise_magnitude()
+        xi_history.append(xi)
+        noise_history.append(noise_mag)
+
+        # --- PERIODIC DIAGNOSTICS --- #
+        if (episode + 1) % LOG_EVERY == 0:
+            window = episode_rewards[-LOG_EVERY:]
+            avg_reward = float(np.mean(window))
+            avg_amb = float(np.mean(episode_ambiguous[-LOG_EVERY:]))
+            tqdm.write(
+                f"[Ep {episode + 1:>4}] "
+                f"avg_reward={avg_reward:8.2f} | "
+                f"xi={xi:5.3f} | noise_D={noise_mag:6.4f} | "
+                f"ambiguous/ep={avg_amb:4.1f}/{MAX_STEPS}"
+            )
 
     print("\nTraining Completed! Exporting data and weights...")
     torch.save(agent.actor.state_dict(), os.path.join(models_dir, 'actor.pth'))
@@ -136,6 +188,9 @@ def main():
     np.savetxt(os.path.join(results_dir, "raw_violations.txt"), episode_safety_violations)
     np.savetxt(os.path.join(results_dir, "critic_losses.txt"), critic_losses)
     np.savetxt(os.path.join(results_dir, "actor_losses.txt"), actor_losses)
+    np.savetxt(os.path.join(results_dir, "raw_ambiguous.txt"), episode_ambiguous)
+    np.savetxt(os.path.join(results_dir, "xi_history.txt"), xi_history)
+    np.savetxt(os.path.join(results_dir, "noise_history.txt"), noise_history)
     
     plot_and_save_metrics(episode_rewards, episode_safety_violations, results_dir)
 

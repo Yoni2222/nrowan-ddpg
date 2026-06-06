@@ -1,48 +1,47 @@
-import torch
+from collections import deque
+import numpy as np
 
-class NROWANParameterNoise:
-    def __init__(self, initial_std=0.1, min_std=0.01, decay_rate=0.995):
-        """
-        NROWAN Parameter Noise Mechanism.
-        Adds noise directly to the network's weights to encourage consistent exploration.
-        """
-        self.std = initial_std
-        self.min_std = min_std
-        self.decay_rate = decay_rate
-        self.clean_weights = {}
 
-    def apply_noise(self, model):
-        """
-        Saves the current clean weights and applies Gaussian noise 
-        directly to the network's parameters.
-        """
-        self.clean_weights = {}
-        # Disable gradient tracking for noise injection
-        with torch.no_grad():
-            for name, param in model.named_parameters():
-                # 1. Save the clean, unaltered weight
-                self.clean_weights[name] = param.data.clone()
-                
-                # 2. Generate Gaussian noise with the current standard deviation
-                noise = torch.randn_like(param) * self.std
-                
-                # 3. Add noise directly to the weight tensor
-                param.add_(noise)
+class OnlineWeightAdjuster:
+    """
+    NROWAN Online Weight Adjustment.
 
-    def revert_noise(self, model):
-        """
-        Restores the network to its clean, un-noised state.
-        This must be called immediately after selecting an action!
-        """
-        with torch.no_grad():
-            for name, param in model.named_parameters():
-                if name in self.clean_weights:
-                    # Restore the saved clean weight
-                    param.data.copy_(self.clean_weights[name])
+    Controls xi, the weight of the noise-reduction loss D in the actor's
+    objective:
 
-    def decay_noise(self):
-        """
-        Reduces the standard deviation of the noise. 
-        In NROWAN, as the agent gets safer and collects rewards, the noise decays.
-        """
-        self.std = max(self.min_std, self.std * self.decay_rate)
+        actor_loss = -Q(s, a) + xi * D
+
+    Intuition (from NROWAN): when the agent performs well and consistently, we
+    want it to REDUCE its exploration noise (act more deterministically). So xi
+    grows as recent performance approaches the best seen so far, and shrinks
+    when performance is poor (keep exploring).
+
+    Performance is normalized online against the running min/max of the average
+    episode return, so no prior knowledge of the reward scale is required.
+    """
+
+    def __init__(self, xi_max=1.0, window=20):
+        self.xi_max = xi_max          # upper bound on the noise-reduction weight
+        self.window = window
+        self.recent = deque(maxlen=window)
+        self.r_low = None
+        self.r_high = None
+        self.xi = 0.0
+
+    def update(self, episode_reward):
+        """Call once per episode with the episode's total reward. Returns the
+        updated xi."""
+        self.recent.append(float(episode_reward))
+        avg = float(np.mean(self.recent))
+
+        # Maintain running min/max of the smoothed return
+        self.r_low = avg if self.r_low is None else min(self.r_low, avg)
+        self.r_high = avg if self.r_high is None else max(self.r_high, avg)
+
+        spread = self.r_high - self.r_low
+        if spread > 1e-8:
+            progress = (avg - self.r_low) / spread        # in [0, 1]
+            self.xi = self.xi_max * float(np.clip(progress, 0.0, 1.0))
+        else:
+            self.xi = 0.0
+        return self.xi
