@@ -73,7 +73,8 @@ def main():
     # xi_max: upper bound on the noise-reduction weight. If the D term dominates
     #         the actor loss (watch the printed [policy vs xi*D] split), lower it.
     SIGMA_INIT = 0.5
-    XI_MAX = 5.0
+    XI_MAX = 0.5    # lowered from 5.0: at 5.0 noise_D collapsed by ~ep 100,
+                    # killing exploration too early and causing the plateau
 
     agent = DDPGAgent(state_dim, action_dim, max_action,
                       sigma_init=SIGMA_INIT, xi_max=XI_MAX)
@@ -82,7 +83,10 @@ def main():
     MAX_EPISODES = 2000
     MAX_STEPS = 100
     BATCH_SIZE = 128
+    WARMUP_STEPS = 5000      # pure-random steps before training, to seed the buffer
     LOG_EVERY = 50           # print a diagnostics summary every N episodes
+
+    total_steps = 0          # global step counter (drives the warmup phase)
 
     episode_rewards = []
     episode_safety_violations = []
@@ -110,8 +114,16 @@ def main():
         ep_violations = 0
         ep_ambiguous = 0
 
+        # NROWAN: one coherent exploration perturbation for the whole episode
+        agent.reset_exploration_noise()
+
         for step in range(MAX_STEPS):
-            flat_action = agent.select_action(state, explore=True)
+            if total_steps < WARMUP_STEPS:
+                # Warmup: pure-random actions to seed the buffer with diverse data
+                flat_action = np.random.uniform(
+                    -max_action, max_action, size=action_dim).astype(np.float32)
+            else:
+                flat_action = agent.select_action(state, explore=True)
 
             # Scatter the controlled actions into a full redispatch vector and
             # scale each by that generator's ramp limit (MW). Non-redispatchable
@@ -145,14 +157,15 @@ def main():
 
             replay_buffer.add(state, flat_action, reward, next_state, done)
             
-            if replay_buffer.size > BATCH_SIZE:
+            if total_steps >= WARMUP_STEPS and replay_buffer.size > BATCH_SIZE:
                 c_loss, a_loss = agent.train(replay_buffer, BATCH_SIZE)
                 critic_losses.append(c_loss)
                 actor_losses.append(a_loss)
-                
+
             state = next_state
             ep_reward += reward
-            
+            total_steps += 1
+
             if done:
                 break
                 

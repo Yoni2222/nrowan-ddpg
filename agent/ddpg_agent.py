@@ -34,15 +34,24 @@ class DDPGAgent:
     def select_action(self, state, explore=True):
         state = torch.FloatTensor(state.reshape(1, -1)).to(self.device)
         if explore:
-            # train() mode -> noisy weights active; fresh noise for this step
+            # train() mode -> noisy weights active. NOTE: the noise is NOT
+            # resampled here; it is reset once per episode (see
+            # reset_exploration_noise) so exploration stays COHERENT across the
+            # whole episode instead of jittering every step.
             self.actor.train()
-            self.actor.reset_noise()
         else:
             # eval() mode -> deterministic policy (learned means only)
             self.actor.eval()
         with torch.no_grad():
             action = self.actor(state).cpu().data.numpy().flatten()
         return np.clip(action, -self.max_action, self.max_action)
+
+    def reset_exploration_noise(self):
+        """Sample one fresh exploration perturbation for the actor. Call at the
+        START of each episode so the agent commits to a single perturbed policy
+        for the whole episode (coherent, directed exploration)."""
+        self.actor.train()
+        self.actor.reset_noise()
 
     def update_noise_weight(self, episode_reward):
         """NROWAN: recompute xi once per episode based on recent performance."""
@@ -85,8 +94,10 @@ class DDPGAgent:
         self.critic_optimizer.step()
 
         # ---------------------- ACTOR UPDATE ---------------------- #
-        # Fresh exploration noise for the policy gradient pass
-        self.actor.reset_noise()
+        # NOTE: we deliberately do NOT resample the actor's noise here. The
+        # exploration epsilon is fixed per episode (reset_exploration_noise), so
+        # training must not disturb it. sigma still gets gradients through the
+        # fixed epsilon and through the noise-reduction loss D below.
         policy_loss = -self.critic(state, self.actor(state)).mean()
 
         # NROWAN noise-reduction loss D, weighted by the online xi
