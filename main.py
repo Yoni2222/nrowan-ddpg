@@ -9,6 +9,7 @@ from env_setup.state_extractor import extract_state
 from agent.ddpg_agent import DDPGAgent
 from agent.memory import ReplayBuffer
 
+
 def get_save_paths():
     colab_drive_path = '/content/drive/MyDrive/'
     if os.path.exists(colab_drive_path):
@@ -20,192 +21,212 @@ def get_save_paths():
         print("Google Drive detection: NOT FOUND. Saving to local project directory...")
         models_dir = "saved_models"
         results_dir = "results"
-        
+
     os.makedirs(models_dir, exist_ok=True)
     os.makedirs(results_dir, exist_ok=True)
     return models_dir, results_dir
 
-def plot_and_save_metrics(rewards, safety_violations, results_dir):
-    episodes = range(1, len(rewards) + 1)
-    plt.figure(figsize=(12, 5))
-    
-    plt.subplot(1, 2, 1)
-    plt.plot(episodes, rewards, color='blue', linewidth=1.5)
-    plt.title('DDPG Convergence (Reward per Episode)')
-    plt.xlabel('Episode')
-    plt.ylabel('Cumulative Reward')
-    plt.grid(True)
-    
-    plt.subplot(1, 2, 2)
-    plt.plot(episodes, safety_violations, color='red', linewidth=1.5)
-    plt.title('Safety Violations (rho >= 1.0)')
-    plt.xlabel('Episode')
-    plt.ylabel('Number of Violations')
-    plt.grid(True)
-    
-    plt.tight_layout()
-    graph_path = os.path.join(results_dir, 'training_metrics.png')
-    plt.savefig(graph_path)
-    plt.close()
-    print(f"=> Graphs successfully saved to: {graph_path}")
 
-def main():
-    models_dir, results_dir = get_save_paths()
-    
-    print("Initializing Grid2Op environment...")
-    env = grid2op.make("rte_case14_realistic")
-    
-    dummy_obs = env.reset()
-    state_dim = extract_state(dummy_obs).shape[0]
+def moving_average(data, window):
+    data = np.asarray(data, dtype=float)
+    if len(data) < window:
+        return data
+    return np.convolve(data, np.ones(window) / window, mode='valid')
 
-    # --- ACTION SPACE FIX --- #
-    # Only generators flagged redispatchable can be controlled. Setting redispatch
-    # on a non-redispatchable generator makes the whole action AMBIGUOUS, so
-    # Grid2Op discards it and applies do-nothing -> the agent had zero effect.
-    redisp_mask = np.asarray(env.gen_redispatchable, dtype=bool)
-    ramp_up = np.asarray(env.gen_max_ramp_up, dtype=np.float32)
-    action_dim = int(np.sum(redisp_mask))   # control ONLY redispatchable generators
-    max_action = 1.0                         # actor outputs [-1, 1]; scaled by ramp below
-    print(f"Controllable (redispatchable) generators: {action_dim} / {env.n_gen}")
 
-    # --- NROWAN hyperparameters (tune these to match the paper) ---
-    # sigma_init: initial exploration noise level inside the noisy layers.
-    # xi_max: upper bound on the noise-reduction weight. If the D term dominates
-    #         the actor loss (watch the printed [policy vs xi*D] split), lower it.
-    SIGMA_INIT = 0.5
-    XI_MAX = 0.5    # lowered from 5.0: at 5.0 noise_D collapsed by ~ep 100,
-                    # killing exploration too early and causing the plateau
+def compute_donothing_reference(env, n_ep, max_steps):
+    """Reference baseline: take the empty action every step. Returns mean episode
+    length (survival) and mean violations per episode."""
+    lengths, viols = [], []
+    for e in range(n_ep):
+        env.set_id(e % 100)
+        obs = env.reset()
+        L, v = 0, 0
+        for _ in range(max_steps):
+            obs, r, done, info = env.step(env.action_space({}))
+            L += 1
+            if np.max(np.nan_to_num(obs.rho, nan=0.0)) >= 1.0:
+                v += 1
+            if done:
+                break
+        lengths.append(L)
+        viols.append(v)
+    return float(np.mean(lengths)), float(np.mean(viols))
+
+
+def run_training(env, mode, seed, redisp_mask, ramp_up, state_dim, action_dim,
+                 max_action, n_episodes, max_steps, warmup_steps, batch_size,
+                 sigma_init, xi_max):
+    """Train one agent (mode='nrowan' or 'vanilla') and return per-episode metrics.
+    The same seed is used for both methods so they face the SAME chronics order
+    -> a fair, paired comparison where the only difference is the algorithm."""
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    try:
+        env.seed(seed)
+    except Exception:
+        pass
 
     agent = DDPGAgent(state_dim, action_dim, max_action,
-                      sigma_init=SIGMA_INIT, xi_max=XI_MAX)
+                      sigma_init=sigma_init, xi_max=xi_max, mode=mode)
     replay_buffer = ReplayBuffer(state_dim, action_dim)
 
-    MAX_EPISODES = 2000
-    MAX_STEPS = 100
-    BATCH_SIZE = 128
-    WARMUP_STEPS = 5000      # pure-random steps before training, to seed the buffer
-    LOG_EVERY = 50           # print a diagnostics summary every N episodes
+    ep_lengths, ep_violations, ep_rewards = [], [], []
+    total_steps = 0
 
-    total_steps = 0          # global step counter (drives the warmup phase)
-
-    episode_rewards = []
-    episode_safety_violations = []
-    episode_ambiguous = []   # ambiguous-action count per episode (should be ~0)
-    xi_history = []          # NROWAN noise-reduction weight per episode
-    noise_history = []       # NROWAN noise magnitude D per episode
-    actor_losses = []
-    critic_losses = []
-
-    print(f"\nStarting Training Loop for {MAX_EPISODES} episodes on {agent.device}...")
-    
-    for episode in tqdm(range(MAX_EPISODES), desc="Training Progress"):
-        
-        # --- THE REAL UNBREAKABLE FIX: Force absolute uniform randomness on every episode --- #
-        # We sample a completely random folder index from 0 to 999 independently every time.
-        # This completely bypasses Grid2Op's internal sequential loops.
-        random_chronic_idx = int(np.random.randint(0, 1000))
-        env.set_id(random_chronic_idx)
-        # ------------------------------------------------------------------------------------ #
-        
+    for episode in tqdm(range(n_episodes), desc=f"{mode:7s}"):
+        env.set_id(int(np.random.randint(0, 1000)))
         obs = env.reset()
         state = extract_state(obs)
-        
-        ep_reward = 0
-        ep_violations = 0
-        ep_ambiguous = 0
 
-        # NROWAN: one coherent exploration perturbation for the whole episode
-        agent.reset_exploration_noise()
+        ep_reward, ep_violation, length = 0.0, 0, 0
+        agent.reset_exploration_noise()   # NROWAN: coherent per-episode noise
 
-        for step in range(MAX_STEPS):
-            if total_steps < WARMUP_STEPS:
-                # Warmup: pure-random actions to seed the buffer with diverse data
+        for step in range(max_steps):
+            if total_steps < warmup_steps:
                 flat_action = np.random.uniform(
                     -max_action, max_action, size=action_dim).astype(np.float32)
             else:
                 flat_action = agent.select_action(state, explore=True)
 
-            # Scatter the controlled actions into a full redispatch vector and
-            # scale each by that generator's ramp limit (MW). Non-redispatchable
-            # generators stay at 0 so the action is never ambiguous.
             full_redispatch = np.zeros(env.n_gen, dtype=np.float32)
             full_redispatch[redisp_mask] = flat_action * ramp_up[redisp_mask]
-            g2op_action = env.action_space({"redispatch": full_redispatch})
-            
-            next_obs, reward, done, info = env.step(g2op_action)
+            next_obs, reward, done, info = env.step(
+                env.action_space({"redispatch": full_redispatch}))
             next_state = extract_state(next_obs)
 
-            # DIAGNOSTIC: did Grid2Op reject the action? After the fix this
-            # should stay ~0. If it spikes, the redispatch is still illegal.
-            if info.get("is_ambiguous", False) or info.get("is_illegal", False):
-                ep_ambiguous += 1
-
-            # --- SAFETY TRACKER & REWARD SHAPING --- #
-            safe_rho = np.nan_to_num(next_obs.rho, nan=0.0)
-            max_rho = np.max(safe_rho)
-
+            max_rho = np.max(np.nan_to_num(next_obs.rho, nan=0.0))
             if max_rho >= 1.0:
-                ep_violations += 1
-
+                ep_violation += 1
             if max_rho > 0.8:
-                penalty = (max_rho - 0.8) * 10.0
-                reward -= penalty
-            
-            # Clip the modified single-step reward strictly between -10.0 and 2.0
+                reward -= (max_rho - 0.8) * 10.0
             reward = np.clip(reward, -10.0, 2.0)
-            # ----------------------------------------------------- #
 
             replay_buffer.add(state, flat_action, reward, next_state, done)
-            
-            if total_steps >= WARMUP_STEPS and replay_buffer.size > BATCH_SIZE:
-                c_loss, a_loss = agent.train(replay_buffer, BATCH_SIZE)
-                critic_losses.append(c_loss)
-                actor_losses.append(a_loss)
+
+            if total_steps >= warmup_steps and replay_buffer.size > batch_size:
+                agent.train(replay_buffer, batch_size)
 
             state = next_state
             ep_reward += reward
+            length += 1
             total_steps += 1
-
             if done:
                 break
-                
-        episode_rewards.append(ep_reward)
-        episode_safety_violations.append(ep_violations)
-        episode_ambiguous.append(ep_ambiguous)
 
-        # NROWAN Online Weight Adjustment: update xi (the noise-reduction weight)
-        # from this episode's performance. As the policy improves, xi grows and
-        # the learned exploration noise is driven down.
-        xi = agent.update_noise_weight(ep_reward)
-        noise_mag = agent.noise_magnitude()
-        xi_history.append(xi)
-        noise_history.append(noise_mag)
+        ep_lengths.append(length)
+        ep_violations.append(ep_violation)
+        ep_rewards.append(ep_reward)
+        agent.update_noise_weight(ep_reward)
 
-        # --- PERIODIC DIAGNOSTICS --- #
-        if (episode + 1) % LOG_EVERY == 0:
-            window = episode_rewards[-LOG_EVERY:]
-            avg_reward = float(np.mean(window))
-            avg_amb = float(np.mean(episode_ambiguous[-LOG_EVERY:]))
-            tqdm.write(
-                f"[Ep {episode + 1:>4}] "
-                f"avg_reward={avg_reward:8.2f} | "
-                f"xi={xi:5.3f} | noise_D={noise_mag:6.4f} | "
-                f"ambiguous/ep={avg_amb:4.1f}/{MAX_STEPS}"
-            )
+    return agent, {"lengths": ep_lengths, "violations": ep_violations, "rewards": ep_rewards}
 
-    print("\nTraining Completed! Exporting data and weights...")
-    torch.save(agent.actor.state_dict(), os.path.join(models_dir, 'actor.pth'))
-    torch.save(agent.critic.state_dict(), os.path.join(models_dir, 'critic.pth'))
-    
-    np.savetxt(os.path.join(results_dir, "raw_rewards.txt"), episode_rewards)
-    np.savetxt(os.path.join(results_dir, "raw_violations.txt"), episode_safety_violations)
-    np.savetxt(os.path.join(results_dir, "critic_losses.txt"), critic_losses)
-    np.savetxt(os.path.join(results_dir, "actor_losses.txt"), actor_losses)
-    np.savetxt(os.path.join(results_dir, "raw_ambiguous.txt"), episode_ambiguous)
-    np.savetxt(os.path.join(results_dir, "xi_history.txt"), xi_history)
-    np.savetxt(os.path.join(results_dir, "noise_history.txt"), noise_history)
-    
-    plot_and_save_metrics(episode_rewards, episode_safety_violations, results_dir)
+
+def plot_comparison(results, donothing, results_dir, ma_window):
+    dn_len, dn_viol = donothing
+    colors = {"nrowan": "green", "vanilla": "darkorange"}
+    labels = {"nrowan": "NROWAN-DDPG (ours)", "vanilla": "Vanilla DDPG"}
+
+    plt.figure(figsize=(14, 5))
+
+    # --- Survival (episode length) --- #
+    plt.subplot(1, 2, 1)
+    for mode, res in results.items():
+        ep = range(1, len(res["lengths"]) + 1)
+        plt.plot(ep, res["lengths"], color=colors[mode], alpha=0.15)
+        ma = moving_average(res["lengths"], ma_window)
+        plt.plot(range(ma_window, len(res["lengths"]) + 1), ma,
+                 color=colors[mode], linewidth=2, label=labels[mode])
+    plt.axhline(dn_len, color='gray', linestyle='--', linewidth=2,
+                label=f'do-nothing ({dn_len:.0f})')
+    plt.title('Survival: steps before blackout (higher = better)')
+    plt.xlabel('Episode')
+    plt.ylabel('Episode length')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.5)
+
+    # --- Violations --- #
+    plt.subplot(1, 2, 2)
+    for mode, res in results.items():
+        plt.plot(range(1, len(res["violations"]) + 1), res["violations"],
+                 color=colors[mode], alpha=0.15)
+        ma = moving_average(res["violations"], ma_window)
+        plt.plot(range(ma_window, len(res["violations"]) + 1), ma,
+                 color=colors[mode], linewidth=2, label=labels[mode])
+    plt.axhline(dn_viol, color='gray', linestyle='--', linewidth=2,
+                label=f'do-nothing ({dn_viol:.1f})')
+    plt.title('Safety violations per episode (lower = better)')
+    plt.xlabel('Episode')
+    plt.ylabel('Violations (rho >= 1.0)')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.5)
+
+    plt.tight_layout()
+    path = os.path.join(results_dir, 'comparison_nrowan_vs_vanilla.png')
+    plt.savefig(path, dpi=200)
+    plt.close()
+    print(f"=> Comparison graph saved to: {path}")
+
+
+def main():
+    models_dir, results_dir = get_save_paths()
+
+    print("Initializing Grid2Op environment...")
+    env = grid2op.make("rte_case14_realistic")
+
+    dummy_obs = env.reset()
+    state_dim = extract_state(dummy_obs).shape[0]
+    redisp_mask = np.asarray(env.gen_redispatchable, dtype=bool)
+    ramp_up = np.asarray(env.gen_max_ramp_up, dtype=np.float32)
+    action_dim = int(np.sum(redisp_mask))
+    max_action = 1.0
+    print(f"Controllable (redispatchable) generators: {action_dim} / {env.n_gen}")
+
+    # --- Experiment configuration (fast de-risk) --- #
+    MAX_EPISODES = 150
+    MAX_STEPS = 2000          # long horizon: let the grid actually get stressed
+    BATCH_SIZE = 128
+    WARMUP_STEPS = 5000
+    SIGMA_INIT = 0.5
+    XI_MAX = 0.5
+    SEED = 0                  # same seed for both methods => paired comparison
+    MA_WINDOW = 20
+
+    print("\nComputing do-nothing reference baseline...")
+    donothing = compute_donothing_reference(env, n_ep=10, max_steps=MAX_STEPS)
+    print(f"   do-nothing: mean length={donothing[0]:.1f} | mean violations={donothing[1]:.2f}")
+
+    results = {}
+    for mode in ["nrowan", "vanilla"]:
+        print(f"\n=== Training [{mode}] for {MAX_EPISODES} episodes ===")
+        agent, res = run_training(
+            env, mode, SEED, redisp_mask, ramp_up, state_dim, action_dim,
+            max_action, MAX_EPISODES, MAX_STEPS, WARMUP_STEPS, BATCH_SIZE,
+            SIGMA_INIT, XI_MAX)
+        results[mode] = res
+
+        torch.save(agent.actor.state_dict(), os.path.join(models_dir, f'actor_{mode}.pth'))
+        np.savetxt(os.path.join(results_dir, f"lengths_{mode}.txt"), res["lengths"])
+        np.savetxt(os.path.join(results_dir, f"violations_{mode}.txt"), res["violations"])
+        np.savetxt(os.path.join(results_dir, f"rewards_{mode}.txt"), res["rewards"])
+
+        last = slice(-30, None)
+        print(f"   [{mode}] last-30 mean length={np.mean(res['lengths'][last]):.1f} | "
+              f"mean violations={np.mean(res['violations'][last]):.2f}")
+
+    np.savetxt(os.path.join(results_dir, "donothing_reference.txt"), np.array(donothing))
+    plot_comparison(results, donothing, results_dir, MA_WINDOW)
+
+    # --- Final verdict summary --- #
+    print("\n================ SUMMARY (last-30-episode averages) ================")
+    print(f"{'method':18s} {'survival':>10s} {'violations':>12s}")
+    print(f"{'do-nothing':18s} {donothing[0]:10.1f} {donothing[1]:12.2f}")
+    for mode in ["nrowan", "vanilla"]:
+        l = np.mean(results[mode]['lengths'][-30:])
+        v = np.mean(results[mode]['violations'][-30:])
+        print(f"{mode:18s} {l:10.1f} {v:12.2f}")
+    print("===================================================================")
+
 
 if __name__ == "__main__":
     main()

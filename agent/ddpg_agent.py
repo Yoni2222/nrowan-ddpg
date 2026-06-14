@@ -8,13 +8,23 @@ from agent.noise import OnlineWeightAdjuster
 
 class DDPGAgent:
     def __init__(self, state_dim, action_dim, max_action, discount=0.99, tau=0.001,
-                 sigma_init=0.5, xi_max=1.0):
+                 sigma_init=0.5, xi_max=1.0, mode="nrowan",
+                 expl_noise=0.2, expl_noise_decay=0.99, expl_noise_min=0.02):
+        """
+        mode = "nrowan"  -> our method: NoisyLinear actor + noise-reduction loss D
+                            + online weight adjustment (exploration inside the net)
+        mode = "vanilla" -> classic DDPG baseline: deterministic actor + decaying
+                            Gaussian action-space noise, no D, no online weight
+        """
+        assert mode in ("nrowan", "vanilla")
+        self.mode = mode
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.discount = discount
         self.tau = tau
 
-        # Actor with NROWAN noisy layers (exploration lives inside the network)
-        self.actor = Actor(state_dim, action_dim, max_action, sigma_init=sigma_init).to(self.device)
+        noisy = (mode == "nrowan")
+        self.actor = Actor(state_dim, action_dim, max_action,
+                           sigma_init=sigma_init, noisy=noisy).to(self.device)
         self.actor_target = copy.deepcopy(self.actor)
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
 
@@ -25,7 +35,12 @@ class DDPGAgent:
 
         # NROWAN online weight adjustment for the noise-reduction loss D
         self.online_adjuster = OnlineWeightAdjuster(xi_max=xi_max)
-        self.noise_weight = 0.0   # xi, updated once per episode from main loop
+        self.noise_weight = 0.0   # xi, updated once per episode (nrowan only)
+
+        # Vanilla-baseline Gaussian action-noise schedule (ignored in nrowan mode)
+        self.expl_noise = expl_noise            # std as a fraction of max_action
+        self.expl_noise_decay = expl_noise_decay
+        self.expl_noise_min = expl_noise_min
 
         self.max_action = max_action
         self.state_dim = state_dim
@@ -33,29 +48,41 @@ class DDPGAgent:
 
     def select_action(self, state, explore=True):
         state = torch.FloatTensor(state.reshape(1, -1)).to(self.device)
-        if explore:
-            # train() mode -> noisy weights active. NOTE: the noise is NOT
-            # resampled here; it is reset once per episode (see
-            # reset_exploration_noise) so exploration stays COHERENT across the
-            # whole episode instead of jittering every step.
-            self.actor.train()
+
+        if self.mode == "nrowan":
+            # Exploration lives in the noisy weights. train() -> noise active;
+            # the noise is NOT resampled here (reset once per episode, see
+            # reset_exploration_noise) so exploration is COHERENT across the
+            # episode. eval() -> deterministic policy (learned means only).
+            self.actor.train() if explore else self.actor.eval()
+            with torch.no_grad():
+                action = self.actor(state).cpu().data.numpy().flatten()
         else:
-            # eval() mode -> deterministic policy (learned means only)
+            # Vanilla DDPG: deterministic actor + external Gaussian action noise
             self.actor.eval()
-        with torch.no_grad():
-            action = self.actor(state).cpu().data.numpy().flatten()
+            with torch.no_grad():
+                action = self.actor(state).cpu().data.numpy().flatten()
+            if explore:
+                action = action + np.random.normal(
+                    0.0, self.expl_noise * self.max_action, size=action.shape)
+
         return np.clip(action, -self.max_action, self.max_action)
 
     def reset_exploration_noise(self):
-        """Sample one fresh exploration perturbation for the actor. Call at the
-        START of each episode so the agent commits to a single perturbed policy
-        for the whole episode (coherent, directed exploration)."""
-        self.actor.train()
-        self.actor.reset_noise()
+        """NROWAN: sample one fresh exploration perturbation for the actor at the
+        START of each episode (coherent, directed exploration). No-op for vanilla."""
+        if self.mode == "nrowan":
+            self.actor.train()
+            self.actor.reset_noise()
 
     def update_noise_weight(self, episode_reward):
-        """NROWAN: recompute xi once per episode based on recent performance."""
-        self.noise_weight = self.online_adjuster.update(episode_reward)
+        """Per-episode update. NROWAN: recompute xi from recent performance.
+        Vanilla: decay the Gaussian action-noise std."""
+        if self.mode == "nrowan":
+            self.noise_weight = self.online_adjuster.update(episode_reward)
+        else:
+            self.expl_noise = max(self.expl_noise_min,
+                                  self.expl_noise * self.expl_noise_decay)
         return self.noise_weight
 
     def noise_magnitude(self):

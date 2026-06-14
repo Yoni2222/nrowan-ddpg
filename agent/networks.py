@@ -82,12 +82,19 @@ class Actor(nn.Module):
     instead of an external noise process.
     """
 
-    def __init__(self, state_dim, action_dim, max_action, sigma_init=0.5):
+    def __init__(self, state_dim, action_dim, max_action, sigma_init=0.5, noisy=True):
         super(Actor, self).__init__()
 
+        self.noisy = noisy
         self.fc1 = nn.Linear(state_dim, 256)
-        self.fc2 = NoisyLinear(256, 128, sigma_init=sigma_init)
-        self.fc3 = NoisyLinear(128, action_dim, sigma_init=sigma_init)
+        if noisy:
+            # NROWAN: learned-noise head
+            self.fc2 = NoisyLinear(256, 128, sigma_init=sigma_init)
+            self.fc3 = NoisyLinear(128, action_dim, sigma_init=sigma_init)
+        else:
+            # Vanilla DDPG baseline: plain deterministic head
+            self.fc2 = nn.Linear(256, 128)
+            self.fc3 = nn.Linear(128, action_dim)
 
         self.max_action = max_action
 
@@ -99,13 +106,17 @@ class Actor(nn.Module):
         return self.max_action * x
 
     def reset_noise(self):
-        self.fc2.reset_noise()
-        self.fc3.reset_noise()
+        if self.noisy:
+            self.fc2.reset_noise()
+            self.fc3.reset_noise()
 
     def noise_loss(self):
         """NROWAN noise-reduction loss D: total noise magnitude across the
-        noisy layers. Minimizing this drives the policy toward determinism."""
-        return self.fc2.noise_magnitude() + self.fc3.noise_magnitude()
+        noisy layers. Minimizing this drives the policy toward determinism.
+        Returns 0 for the vanilla (non-noisy) baseline."""
+        if self.noisy:
+            return self.fc2.noise_magnitude() + self.fc3.noise_magnitude()
+        return torch.zeros((), device=self.fc1.weight.device)
 
 
 class Critic(nn.Module):
