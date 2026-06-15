@@ -16,11 +16,24 @@ The agent/network/noise code is reused UNCHANGED from the grid2op experiment;
 only the environment loop differs.
 """
 import os
+import math
 import numpy as np
 import torch
 import gymnasium as gym
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+
+DISCOUNT = 0.99   # must match the agent's discount for potential-based shaping
+
+
+def potential(state):
+    """Potential Phi(s) for reward shaping = a mechanical-energy proxy:
+    height (sin(3*position)) + scaled kinetic energy (velocity^2). Potential-
+    based shaping F = gamma*Phi(s') - Phi(s) provably preserves the optimal
+    policy (Ng et al., 1999), so it guides learning toward building momentum
+    WITHOUT changing the underlying task. Applied identically to both methods."""
+    p, v = float(state[0]), float(state[1])
+    return math.sin(3.0 * p) + 100.0 * (v ** 2)
 
 from agent.ddpg_agent import DDPGAgent
 from agent.memory import ReplayBuffer
@@ -69,7 +82,7 @@ def run_training(mode, seed, state_dim, action_dim, max_action,
         state, _ = env.reset(seed=seed + episode)
         state = np.asarray(state, dtype=np.float32)
 
-        ep_reward, length, solved = 0.0, 0, 0
+        ep_reward_true, ep_reward_shaped, length, solved = 0.0, 0.0, 0, 0
         agent.reset_exploration_noise()   # NROWAN: coherent per-episode noise
 
         while True:
@@ -83,13 +96,20 @@ def run_training(mode, seed, state_dim, action_dim, max_action,
             next_state = np.asarray(next_state, dtype=np.float32)
             done = bool(terminated)  # only a REAL terminal (goal) zeroes the bootstrap
 
-            replay_buffer.add(state, action, reward, next_state, float(done))
+            # Potential-based shaping (identical for both methods): the agent
+            # LEARNS from the shaped reward (dense momentum-building gradient),
+            # but we REPORT the true env reward + success rate, which shaping
+            # cannot fake -> the comparison stays honest.
+            shaped = reward + DISCOUNT * potential(next_state) - potential(state)
+
+            replay_buffer.add(state, action, shaped, next_state, float(done))
 
             if total_steps >= warmup_steps and replay_buffer.size > batch_size:
                 agent.train(replay_buffer, batch_size)
 
             state = next_state
-            ep_reward += reward
+            ep_reward_true += reward
+            ep_reward_shaped += shaped
             length += 1
             total_steps += 1
 
@@ -98,10 +118,10 @@ def run_training(mode, seed, state_dim, action_dim, max_action,
             if terminated or truncated:
                 break
 
-        ep_rewards.append(ep_reward)
+        ep_rewards.append(ep_reward_true)     # true env reward for honest reporting
         ep_solved.append(solved)
         ep_lengths.append(length)
-        agent.update_noise_weight(ep_reward)
+        agent.update_noise_weight(ep_reward_shaped)   # adjuster sees shaped signal
 
     env.close()
     return agent, {"rewards": ep_rewards, "solved": ep_solved, "lengths": ep_lengths}
