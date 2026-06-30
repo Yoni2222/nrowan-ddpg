@@ -122,24 +122,29 @@ def run_training(env, mode, seed, redisp_mask, ramp_up, state_dim, action_dim,
     return agent, {"lengths": ep_lengths, "violations": ep_violations, "rewards": ep_rewards}
 
 
-def plot_comparison(results, donothing, results_dir, ma_window):
+def plot_comparison(agg, donothing, results_dir, ma_window):
+    """agg[mode][key] is a 2D array [n_seeds, n_episodes]. Plots mean +/- std band."""
     dn_len, dn_viol = donothing
     colors = {"nrowan": "green", "vanilla": "darkorange"}
     labels = {"nrowan": "NROWAN-DDPG (ours)", "vanilla": "Vanilla DDPG"}
+
+    def smoothed_mean_std(arr):
+        # smooth each seed, then take mean/std across seeds
+        sm = np.array([moving_average(arr[s], ma_window) for s in range(arr.shape[0])])
+        return sm.mean(axis=0), sm.std(axis=0)
 
     plt.figure(figsize=(14, 5))
 
     # --- Survival (episode length) --- #
     plt.subplot(1, 2, 1)
-    for mode, res in results.items():
-        ep = range(1, len(res["lengths"]) + 1)
-        plt.plot(ep, res["lengths"], color=colors[mode], alpha=0.15)
-        ma = moving_average(res["lengths"], ma_window)
-        plt.plot(range(ma_window, len(res["lengths"]) + 1), ma,
-                 color=colors[mode], linewidth=2, label=labels[mode])
+    for mode, data in agg.items():
+        mean, std = smoothed_mean_std(data["lengths"])
+        x = np.arange(ma_window, ma_window + len(mean))
+        plt.plot(x, mean, color=colors[mode], linewidth=2.5, label=labels[mode])
+        plt.fill_between(x, mean - std, mean + std, color=colors[mode], alpha=0.20)
     plt.axhline(dn_len, color='gray', linestyle='--', linewidth=2,
                 label=f'do-nothing ({dn_len:.0f})')
-    plt.title('Survival: steps before blackout (higher = better)')
+    plt.title('Survival: steps before blackout (higher = better)  [mean $\\pm$ std, 3 seeds]')
     plt.xlabel('Episode')
     plt.ylabel('Episode length')
     plt.legend()
@@ -147,15 +152,14 @@ def plot_comparison(results, donothing, results_dir, ma_window):
 
     # --- Violations --- #
     plt.subplot(1, 2, 2)
-    for mode, res in results.items():
-        plt.plot(range(1, len(res["violations"]) + 1), res["violations"],
-                 color=colors[mode], alpha=0.15)
-        ma = moving_average(res["violations"], ma_window)
-        plt.plot(range(ma_window, len(res["violations"]) + 1), ma,
-                 color=colors[mode], linewidth=2, label=labels[mode])
+    for mode, data in agg.items():
+        mean, std = smoothed_mean_std(data["violations"])
+        x = np.arange(ma_window, ma_window + len(mean))
+        plt.plot(x, mean, color=colors[mode], linewidth=2.5, label=labels[mode])
+        plt.fill_between(x, mean - std, mean + std, color=colors[mode], alpha=0.20)
     plt.axhline(dn_viol, color='gray', linestyle='--', linewidth=2,
                 label=f'do-nothing ({dn_viol:.1f})')
-    plt.title('Safety violations per episode (lower = better)')
+    plt.title('Safety violations per episode (lower = better)  [mean $\\pm$ std]')
     plt.xlabel('Episode')
     plt.ylabel('Violations (rho >= 1.0)')
     plt.legend()
@@ -182,50 +186,50 @@ def main():
     max_action = 1.0
     print(f"Controllable (redispatchable) generators: {action_dim} / {env.n_gen}")
 
-    # --- Experiment configuration (fast de-risk) --- #
+    # --- Experiment configuration --- #
     MAX_EPISODES = 150
     MAX_STEPS = 2000          # long horizon: let the grid actually get stressed
     BATCH_SIZE = 128
     WARMUP_STEPS = 5000
     SIGMA_INIT = 0.5
     XI_MAX = 0.5
-    SEED = 0                  # same seed for both methods => paired comparison
+    SEEDS = [0, 1, 2]         # multi-seed for a robust claim (mean +/- std)
     MA_WINDOW = 20
 
     print("\nComputing do-nothing reference baseline...")
     donothing = compute_donothing_reference(env, n_ep=10, max_steps=MAX_STEPS)
     print(f"   do-nothing: mean length={donothing[0]:.1f} | mean violations={donothing[1]:.2f}")
 
-    results = {}
+    agg = {}
     for mode in ["nrowan", "vanilla"]:
-        print(f"\n=== Training [{mode}] for {MAX_EPISODES} episodes ===")
-        agent, res = run_training(
-            env, mode, SEED, redisp_mask, ramp_up, state_dim, action_dim,
-            max_action, MAX_EPISODES, MAX_STEPS, WARMUP_STEPS, BATCH_SIZE,
-            SIGMA_INIT, XI_MAX)
-        results[mode] = res
+        per_seed = {"lengths": [], "violations": [], "rewards": []}
+        for seed in SEEDS:
+            print(f"\n=== Training [{mode}] seed={seed} for {MAX_EPISODES} episodes ===")
+            agent, res = run_training(
+                env, mode, seed, redisp_mask, ramp_up, state_dim, action_dim,
+                max_action, MAX_EPISODES, MAX_STEPS, WARMUP_STEPS, BATCH_SIZE,
+                SIGMA_INIT, XI_MAX)
+            for k in per_seed:
+                per_seed[k].append(res[k])
+            torch.save(agent.actor.state_dict(),
+                       os.path.join(models_dir, f'actor_{mode}_seed{seed}.pth'))
 
-        torch.save(agent.actor.state_dict(), os.path.join(models_dir, f'actor_{mode}.pth'))
-        np.savetxt(os.path.join(results_dir, f"lengths_{mode}.txt"), res["lengths"])
-        np.savetxt(os.path.join(results_dir, f"violations_{mode}.txt"), res["violations"])
-        np.savetxt(os.path.join(results_dir, f"rewards_{mode}.txt"), res["rewards"])
-
-        last = slice(-30, None)
-        print(f"   [{mode}] last-30 mean length={np.mean(res['lengths'][last]):.1f} | "
-              f"mean violations={np.mean(res['violations'][last]):.2f}")
+        agg[mode] = {k: np.array(v, dtype=float) for k, v in per_seed.items()}
+        for k in ["lengths", "violations", "rewards"]:
+            np.savetxt(os.path.join(results_dir, f"{k}_{mode}.txt"), agg[mode][k])
 
     np.savetxt(os.path.join(results_dir, "donothing_reference.txt"), np.array(donothing))
-    plot_comparison(results, donothing, results_dir, MA_WINDOW)
+    plot_comparison(agg, donothing, results_dir, MA_WINDOW)
 
-    # --- Final verdict summary --- #
-    print("\n================ SUMMARY (last-30-episode averages) ================")
-    print(f"{'method':18s} {'survival':>10s} {'violations':>12s}")
-    print(f"{'do-nothing':18s} {donothing[0]:10.1f} {donothing[1]:12.2f}")
+    # --- Final verdict: mean +/- std across the 3 seeds (last-30-ep averages) --- #
+    print("\n========== SUMMARY (last-30-ep averages: mean +/- std over 3 seeds) ==========")
+    print(f"{'method':14s} {'survival':>20s} {'violations':>20s}")
+    print(f"{'do-nothing':14s} {donothing[0]:13.1f}{'':7s} {donothing[1]:13.2f}")
     for mode in ["nrowan", "vanilla"]:
-        l = np.mean(results[mode]['lengths'][-30:])
-        v = np.mean(results[mode]['violations'][-30:])
-        print(f"{mode:18s} {l:10.1f} {v:12.2f}")
-    print("===================================================================")
+        l = agg[mode]["lengths"][:, -30:].mean(axis=1)       # one value per seed
+        v = agg[mode]["violations"][:, -30:].mean(axis=1)
+        print(f"{mode:14s} {l.mean():8.1f} +/- {l.std():6.1f}  {v.mean():8.2f} +/- {v.std():6.2f}")
+    print("=============================================================================")
 
 
 if __name__ == "__main__":
