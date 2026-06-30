@@ -50,11 +50,14 @@ class DDPGAgent:
         state = torch.FloatTensor(state.reshape(1, -1)).to(self.device)
 
         if self.mode == "nrowan":
-            # Exploration lives in the noisy weights. train() -> noise active;
-            # the noise is NOT resampled here (reset once per episode, see
-            # reset_exploration_noise) so exploration is COHERENT across the
-            # episode. eval() -> deterministic policy (learned means only).
-            self.actor.train() if explore else self.actor.eval()
+            # Exploration lives in the noisy weights. For acting we use the
+            # BEHAVIORAL noise (frozen for the whole episode -> coherent,
+            # directed exploration). eval() -> deterministic policy (means only).
+            if explore:
+                self.actor.train()
+                self.actor.set_behavioral(True)
+            else:
+                self.actor.eval()
             with torch.no_grad():
                 action = self.actor(state).cpu().data.numpy().flatten()
         else:
@@ -69,11 +72,11 @@ class DDPGAgent:
         return np.clip(action, -self.max_action, self.max_action)
 
     def reset_exploration_noise(self):
-        """NROWAN: sample one fresh exploration perturbation for the actor at the
+        """NROWAN: sample one fresh BEHAVIORAL perturbation for the actor at the
         START of each episode (coherent, directed exploration). No-op for vanilla."""
         if self.mode == "nrowan":
             self.actor.train()
-            self.actor.reset_noise()
+            self.actor.reset_behavioral_noise()
 
     def update_noise_weight(self, episode_reward):
         """Per-episode update. NROWAN: recompute xi from recent performance.
@@ -86,10 +89,9 @@ class DDPGAgent:
         return self.noise_weight
 
     def noise_magnitude(self):
-        """Current NROWAN noise level D (sum of learned sigmas). Should trend
-        DOWN over training as the policy becomes more deterministic."""
-        with torch.no_grad():
-            return self.actor.noise_loss().item()
+        """Current output-layer noise level (mean |sigma|), for diagnostics.
+        Should RISE while exploring, then anneal as the policy stabilizes."""
+        return self.actor.output_sigma()
 
     def train(self, replay_buffer, batch_size=256):
         # Noisy layers must be in training mode so sigma gradients flow
@@ -100,15 +102,14 @@ class DDPGAgent:
 
         # ---------------------- CRITIC UPDATE ---------------------- #
         with torch.no_grad():
+            # Fresh TRAINING noise on the target actor each step (NoisyNet).
+            self.actor_target.set_behavioral(False)
             self.actor_target.reset_noise()
             next_action = self.actor_target(next_state)
             target_Q = self.critic_target(next_state, next_action)
 
             # Bellman Equation
             target_Q = reward + (1 - done) * self.discount * target_Q
-
-            # --- PROTECTION C: Target Q-Value Clipping ---
-            target_Q = torch.clamp(target_Q, min=-150.0, max=150.0)
 
         current_Q = self.critic(state, action)
         critic_loss = F.mse_loss(current_Q, target_Q)
@@ -121,10 +122,12 @@ class DDPGAgent:
         self.critic_optimizer.step()
 
         # ---------------------- ACTOR UPDATE ---------------------- #
-        # NOTE: we deliberately do NOT resample the actor's noise here. The
-        # exploration epsilon is fixed per episode (reset_exploration_noise), so
-        # training must not disturb it. sigma still gets gradients through the
-        # fixed epsilon and through the noise-reduction loss D below.
+        # Use freshly resampled TRAINING noise (NOT the frozen behavioral noise)
+        # so the policy loss is an expectation over noise and sigma receives a
+        # proper gradient. The per-episode behavioral noise used for acting is
+        # left untouched -> coherent exploration AND learnable sigma coexist.
+        self.actor.set_behavioral(False)
+        self.actor.reset_noise()
         policy_loss = -self.critic(state, self.actor(state)).mean()
 
         # NROWAN noise-reduction loss D, weighted by the online xi

@@ -64,7 +64,8 @@ def moving_average(data, window):
 
 
 def run_training(mode, seed, state_dim, action_dim, max_action,
-                 n_episodes, warmup_steps, batch_size, sigma_init, xi_max):
+                 n_episodes, warmup_steps, batch_size, sigma_init, xi_max,
+                 use_shaping=True):
     """Train one agent (mode='nrowan' or 'vanilla') on a single seed and return
     per-episode metrics: reward, solved (reached goal), length (steps)."""
     np.random.seed(seed)
@@ -75,7 +76,7 @@ def run_training(mode, seed, state_dim, action_dim, max_action,
                       sigma_init=sigma_init, xi_max=xi_max, mode=mode)
     replay_buffer = ReplayBuffer(state_dim, action_dim)
 
-    ep_rewards, ep_solved, ep_lengths = [], [], []
+    ep_rewards, ep_solved, ep_lengths, ep_sigma = [], [], [], []
     total_steps = 0
 
     for episode in tqdm(range(n_episodes), desc=f"{mode:7s} seed={seed}"):
@@ -99,8 +100,13 @@ def run_training(mode, seed, state_dim, action_dim, max_action,
             # Potential-based shaping (identical for both methods): the agent
             # LEARNS from the shaped reward (dense momentum-building gradient),
             # but we REPORT the true env reward + success rate, which shaping
-            # cannot fake -> the comparison stays honest.
-            shaped = reward + DISCOUNT * potential(next_state) - potential(state)
+            # cannot fake -> the comparison stays honest. With use_shaping=False
+            # the task is PURE SPARSE (hard exploration) where NROWAN's coherent
+            # noise is expected to beat vanilla's Gaussian noise.
+            if use_shaping:
+                shaped = reward + DISCOUNT * potential(next_state) - potential(state)
+            else:
+                shaped = reward
 
             replay_buffer.add(state, action, shaped, next_state, float(done))
 
@@ -121,10 +127,16 @@ def run_training(mode, seed, state_dim, action_dim, max_action,
         ep_rewards.append(ep_reward_true)     # true env reward for honest reporting
         ep_solved.append(solved)
         ep_lengths.append(length)
-        agent.update_noise_weight(ep_reward_shaped)   # adjuster sees shaped signal
+        ep_sigma.append(agent.noise_magnitude())   # output-layer sigma diagnostic
+        # NROWAN online weight adjustment is driven by SUCCESS (reaching the goal),
+        # not raw reward: in the sparse task "high reward" pre-solve = do-nothing,
+        # so gating xi on actual success keeps exploration ON until the agent can
+        # truly solve, then anneals the noise. (Vanilla ignores this arg.)
+        agent.update_noise_weight(float(solved))
 
     env.close()
-    return agent, {"rewards": ep_rewards, "solved": ep_solved, "lengths": ep_lengths}
+    return agent, {"rewards": ep_rewards, "solved": ep_solved,
+                   "lengths": ep_lengths, "sigma": ep_sigma}
 
 
 def plot_comparison(agg, results_dir, ma_window):
@@ -187,19 +199,22 @@ def main():
     MAX_EPISODES = 150
     BATCH_SIZE = 128
     WARMUP_STEPS = 1000
-    SIGMA_INIT = 0.5
+    SIGMA_INIT = 1.5        # stronger parameter noise: enough to crest the hill
     XI_MAX = 0.5
-    SEEDS = [0, 1, 2]      # multi-seed for a robust claim
+    SEEDS = [0, 1, 2]       # multi-seed for a robust claim
     MA_WINDOW = 10
+    USE_SHAPING = False     # PURE SPARSE: the hard-exploration regime where
+                            # NROWAN's coherent noise should beat vanilla's
 
     agg = {}
     for mode in ["nrowan", "vanilla"]:
-        per_seed = {"rewards": [], "solved": [], "lengths": []}
+        per_seed = {"rewards": [], "solved": [], "lengths": [], "sigma": []}
         for seed in SEEDS:
             print(f"\n=== Training [{mode}] seed={seed} for {MAX_EPISODES} episodes ===")
             agent, res = run_training(
                 mode, seed, state_dim, action_dim, max_action,
-                MAX_EPISODES, WARMUP_STEPS, BATCH_SIZE, SIGMA_INIT, XI_MAX)
+                MAX_EPISODES, WARMUP_STEPS, BATCH_SIZE, SIGMA_INIT, XI_MAX,
+                use_shaping=USE_SHAPING)
             for k in per_seed:
                 per_seed[k].append(res[k])
             torch.save(agent.actor.state_dict(),
@@ -221,6 +236,14 @@ def main():
         l = agg[mode]["lengths"][:, -30:].mean()
         print(f"{mode:18s} {r:10.1f} {s:10.1f} {l:8.0f}")
     print("=========================================================================")
+
+    # --- sigma diagnostic: confirm NROWAN's output-layer noise is LEARNED
+    # (rises while exploring) and then anneals, rather than collapsing at once. --- #
+    sig = agg["nrowan"]["sigma"]   # [seeds, episodes]
+    print("\n--- NROWAN output-layer sigma (mean over seeds) ---")
+    print(f"  init={sig[:, 0].mean():.4f}  max={sig.mean(axis=0).max():.4f}  "
+          f"final={sig[:, -1].mean():.4f}")
+    print("==========================================================================")
 
 
 if __name__ == "__main__":

@@ -29,20 +29,32 @@ class NoisyLinear(nn.Module):
         self.bias_mu = nn.Parameter(torch.empty(out_features))
         self.bias_sigma = nn.Parameter(torch.empty(out_features))
 
-        # Noise buffers (not learned, resampled every reset_noise())
+        # TRAINING noise buffers — resampled on every gradient step so that the
+        # noise-reduction objective is a proper expectation over noise E[L] and
+        # sigma actually receives a learning signal (standard NoisyNet behavior).
         self.register_buffer("weight_epsilon", torch.empty(out_features, in_features))
         self.register_buffer("bias_epsilon", torch.empty(out_features))
 
+        # BEHAVIORAL noise buffers — resampled ONCE per episode and held fixed
+        # during action selection, giving coherent (directed) exploration across
+        # the whole trajectory. Kept separate from the training noise so that
+        # coherent behavior does NOT prevent sigma from being learned.
+        self.register_buffer("weight_epsilon_b", torch.empty(out_features, in_features))
+        self.register_buffer("bias_epsilon_b", torch.empty(out_features))
+        self.use_behavioral = False   # which noise the forward pass uses
+
         self.reset_parameters()
         self.reset_noise()
+        self.reset_behavioral_noise()
 
     def reset_parameters(self):
         mu_range = 1.0 / math.sqrt(self.in_features)
         self.weight_mu.data.uniform_(-mu_range, mu_range)
         self.bias_mu.data.uniform_(-mu_range, mu_range)
-        # Initial sigma scaled by fan-in, as in the NoisyNet paper
+        # Initial sigma scaled by fan-in (in_features) for BOTH weight and bias,
+        # as in Fortunato et al. (NoisyNet).
         self.weight_sigma.data.fill_(self.sigma_init / math.sqrt(self.in_features))
-        self.bias_sigma.data.fill_(self.sigma_init / math.sqrt(self.out_features))
+        self.bias_sigma.data.fill_(self.sigma_init / math.sqrt(self.in_features))
 
     @staticmethod
     def _scale_noise(size):
@@ -50,27 +62,46 @@ class NoisyLinear(nn.Module):
         return x.sign().mul_(x.abs().sqrt_())
 
     def reset_noise(self):
-        """Resample the factorized Gaussian noise. Call before each forward pass
-        where fresh exploration / target noise is desired."""
+        """Resample the TRAINING noise. Called on every gradient step so sigma
+        gets a proper expectation-over-noise gradient."""
         epsilon_in = self._scale_noise(self.in_features)
         epsilon_out = self._scale_noise(self.out_features)
         self.weight_epsilon.copy_(epsilon_out.outer(epsilon_in))
         self.bias_epsilon.copy_(epsilon_out)
 
+    def reset_behavioral_noise(self):
+        """Resample the BEHAVIORAL noise (once per episode) for coherent
+        exploration during action selection."""
+        epsilon_in = self._scale_noise(self.in_features)
+        epsilon_out = self._scale_noise(self.out_features)
+        self.weight_epsilon_b.copy_(epsilon_out.outer(epsilon_in))
+        self.bias_epsilon_b.copy_(epsilon_out)
+
     def forward(self, x):
         if self.training:
-            # Noisy weights — exploration is ON and sigma gradients flow
-            weight = self.weight_mu + self.weight_sigma * self.weight_epsilon
-            bias = self.bias_mu + self.bias_sigma * self.bias_epsilon
+            # Noisy weights — exploration is ON and sigma gradients flow.
+            # Behavioral (frozen, per-episode) noise during acting; training
+            # (freshly resampled) noise during gradient updates.
+            if self.use_behavioral:
+                w_eps, b_eps = self.weight_epsilon_b, self.bias_epsilon_b
+            else:
+                w_eps, b_eps = self.weight_epsilon, self.bias_epsilon
+            weight = self.weight_mu + self.weight_sigma * w_eps
+            bias = self.bias_mu + self.bias_sigma * b_eps
         else:
             # Deterministic (evaluation): use the learned means only
             weight = self.weight_mu
             bias = self.bias_mu
         return F.linear(x, weight, bias)
 
+    def noise_D(self):
+        """Paper eq. (8): normalized total |sigma| of this layer,
+        D = (sum|sigma_w| + sum|sigma_b|) / ((p* + 1) * Na)."""
+        denom = (self.in_features + 1) * self.out_features
+        return (self.weight_sigma.abs().sum() + self.bias_sigma.abs().sum()) / denom
+
     def noise_magnitude(self):
-        """Mean absolute sigma of this layer — the per-layer noise level used by
-        the NROWAN noise-reduction loss D."""
+        """Mean absolute sigma of this layer (diagnostic for tracking sigma)."""
         return self.weight_sigma.abs().mean() + self.bias_sigma.abs().mean()
 
 
@@ -106,17 +137,39 @@ class Actor(nn.Module):
         return self.max_action * x
 
     def reset_noise(self):
+        """Resample TRAINING noise on the noisy layers (per gradient step)."""
         if self.noisy:
             self.fc2.reset_noise()
             self.fc3.reset_noise()
 
-    def noise_loss(self):
-        """NROWAN noise-reduction loss D: total noise magnitude across the
-        noisy layers. Minimizing this drives the policy toward determinism.
-        Returns 0 for the vanilla (non-noisy) baseline."""
+    def reset_behavioral_noise(self):
+        """Resample BEHAVIORAL noise on the noisy layers (once per episode)."""
         if self.noisy:
-            return self.fc2.noise_magnitude() + self.fc3.noise_magnitude()
+            self.fc2.reset_behavioral_noise()
+            self.fc3.reset_behavioral_noise()
+
+    def set_behavioral(self, flag):
+        """Select which noise the forward pass uses: behavioral (acting) or
+        training (gradient updates)."""
+        if self.noisy:
+            self.fc2.use_behavioral = flag
+            self.fc3.use_behavioral = flag
+
+    def noise_loss(self):
+        """NROWAN noise-reduction loss D. Per the paper (eq. 8 + Sec. 4.1), the
+        penalty is applied to the OUTPUT layer ONLY -- the hidden layer's sigma
+        is deliberately left free to stay large. Returns 0 for the vanilla
+        (non-noisy) baseline."""
+        if self.noisy:
+            return self.fc3.noise_D()
         return torch.zeros((), device=self.fc1.weight.device)
+
+    def output_sigma(self):
+        """Mean |sigma| of the OUTPUT layer (diagnostic): should rise while the
+        agent explores, then anneal as the policy stabilizes."""
+        if self.noisy:
+            return float(self.fc3.noise_magnitude().item())
+        return 0.0
 
 
 class Critic(nn.Module):
