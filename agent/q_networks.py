@@ -57,9 +57,10 @@ class MLPQNet(nn.Module):
 
 
 class CNNQNet(nn.Module):
-    """Atari head. Input: (N, 1, 84, 84) grayscale (paper uses 1 frame, no stack)."""
+    """Atari head. Input: (N, C, 84, 84) grayscale frames, C = frame-stack depth
+    (standard Atari DQN uses 4 stacked frames so the net can perceive motion)."""
 
-    def __init__(self, n_actions, in_channels=1, sigma_init=0.4, noisy=True):
+    def __init__(self, n_actions, in_channels=4, sigma_init=0.4, noisy=True):
         super().__init__()
         self.noisy = noisy
         self.conv1 = nn.Conv2d(in_channels, 32, kernel_size=8, stride=4)
@@ -74,6 +75,7 @@ class CNNQNet(nn.Module):
             self.fc2 = nn.Linear(512, n_actions)
 
     def forward(self, x):
+        x = x / 255.0                    # uint8 frames [0,255] -> [0,1]
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
         x = F.relu(self.conv3(x))

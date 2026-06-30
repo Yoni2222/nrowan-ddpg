@@ -42,3 +42,46 @@ class ReplayBuffer:
             torch.FloatTensor(self.next_state[ind]).to(self.device),
             torch.FloatTensor(self.done[ind]).to(self.device)
         )
+
+
+class ImageReplayBuffer:
+    """Replay buffer for Atari image observations.
+
+    Frames are kept as uint8 (0-255) to fit in memory -- 100k transitions of
+    4x84x84 is ~2.8 GB per state array, vs ~13 GB if stored as float32. The
+    network divides by 255 internally (see CNNQNet.forward), so samples are
+    returned as float tensors in the raw [0,255] range.
+    """
+
+    def __init__(self, obs_shape, max_size=int(1e5)):
+        self.max_size = max_size
+        self.ptr = 0
+        self.size = 0
+
+        self.state = np.zeros((max_size, *obs_shape), dtype=np.uint8)
+        self.next_state = np.zeros((max_size, *obs_shape), dtype=np.uint8)
+        self.action = np.zeros((max_size, 1), dtype=np.int64)
+        self.reward = np.zeros((max_size, 1), dtype=np.float32)
+        self.done = np.zeros((max_size, 1), dtype=np.float32)
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def add(self, state, action, reward, next_state, done):
+        self.state[self.ptr] = state
+        self.next_state[self.ptr] = next_state
+        self.action[self.ptr] = action
+        self.reward[self.ptr] = reward
+        self.done[self.ptr] = done
+
+        self.ptr = (self.ptr + 1) % self.max_size
+        self.size = min(self.size + 1, self.max_size)
+
+    def sample(self, batch_size):
+        ind = np.random.randint(0, self.size, size=batch_size)
+        return (
+            torch.FloatTensor(self.state[ind]).to(self.device),
+            torch.LongTensor(self.action[ind]).to(self.device),
+            torch.FloatTensor(self.reward[ind]).to(self.device),
+            torch.FloatTensor(self.next_state[ind]).to(self.device),
+            torch.FloatTensor(self.done[ind]).to(self.device),
+        )

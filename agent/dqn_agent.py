@@ -26,7 +26,8 @@ class DQNAgent:
     def __init__(self, state_dim, n_actions, mode="nrowan", arch="mlp",
                  lr=1e-3, gamma=0.99, target_update=1000,
                  sigma_init=0.4, k_final=4.0, inf_R=0.0, sup_R=1.0,
-                 eps_start=1.0, eps_end=0.05, eps_decay_steps=10000):
+                 eps_start=1.0, eps_end=0.05, eps_decay_steps=10000,
+                 in_channels=4):
         assert mode in ("dqn", "noisynet", "nrowan")
         assert arch in ("mlp", "cnn")
         self.mode = mode
@@ -39,7 +40,8 @@ class DQNAgent:
         if arch == "mlp":
             self.q = MLPQNet(state_dim, n_actions, sigma_init=sigma_init, noisy=noisy)
         else:
-            self.q = CNNQNet(n_actions, sigma_init=sigma_init, noisy=noisy)
+            self.q = CNNQNet(n_actions, in_channels=in_channels,
+                             sigma_init=sigma_init, noisy=noisy)
         self.q = self.q.to(self.device)
         self.q_target = copy.deepcopy(self.q)
         self.opt = torch.optim.Adam(self.q.parameters(), lr=lr)

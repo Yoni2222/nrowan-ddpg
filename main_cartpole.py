@@ -97,7 +97,7 @@ def main():
     results_dir = "results_cartpole"
     os.makedirs(results_dir, exist_ok=True)
 
-    N_EPISODES = 300
+    N_EPISODES = 700
     LR = 1e-4
     TARGET_UPDATE = 1000
     MIN_START = 200
