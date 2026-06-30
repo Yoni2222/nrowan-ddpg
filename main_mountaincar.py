@@ -203,8 +203,11 @@ def main():
     XI_MAX = 0.5
     SEEDS = [0, 1, 2]       # multi-seed for a robust claim
     MA_WINDOW = 10
-    USE_SHAPING = False     # PURE SPARSE: the hard-exploration regime where
-                            # NROWAN's coherent noise should beat vanilla's
+    USE_SHAPING = True      # potential-based shaping (identical for both methods,
+                            # provably policy-invariant): a tractable regime where
+                            # BOTH methods learn, so we can compare success AND
+                            # stability. (Pure sparse, USE_SHAPING=False, is a
+                            # do-nothing trap here -> both fail; see report.)
 
     agg = {}
     for mode in ["nrowan", "vanilla"]:
@@ -227,15 +230,17 @@ def main():
 
     plot_comparison(agg, results_dir, MA_WINDOW)
 
-    # --- Final verdict summary (last-30-episode averages, across seeds) --- #
-    print("\n============= SUMMARY (last-30-episode averages over seeds) =============")
-    print(f"{'method':18s} {'reward':>10s} {'success%':>10s} {'len':>8s}")
+    # --- Final verdict summary: per-seed last-30-ep averages, then report the
+    # MEAN +/- STD across the 3 seeds (robust, honest comparison). --- #
+    print("\n========== SUMMARY (last-30-ep averages: mean +/- std over 3 seeds) ==========")
+    print(f"{'method':12s} {'reward':>16s} {'success%':>16s} {'len':>14s}")
     for mode in ["nrowan", "vanilla"]:
-        r = agg[mode]["rewards"][:, -30:].mean()
-        s = agg[mode]["solved"][:, -30:].mean() * 100
-        l = agg[mode]["lengths"][:, -30:].mean()
-        print(f"{mode:18s} {r:10.1f} {s:10.1f} {l:8.0f}")
-    print("=========================================================================")
+        r = agg[mode]["rewards"][:, -30:].mean(axis=1)      # one value per seed
+        s = agg[mode]["solved"][:, -30:].mean(axis=1) * 100
+        l = agg[mode]["lengths"][:, -30:].mean(axis=1)
+        print(f"{mode:12s} {r.mean():7.1f} +/- {r.std():5.1f} "
+              f"{s.mean():7.1f} +/- {s.std():5.1f} {l.mean():6.0f} +/- {l.std():4.0f}")
+    print("=============================================================================")
 
     # --- sigma diagnostic: confirm NROWAN's output-layer noise is LEARNED
     # (rises while exploring) and then anneals, rather than collapsing at once. --- #
