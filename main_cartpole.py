@@ -43,10 +43,14 @@ EVAL_ROUNDS = 64                  # post-training evaluation rounds per instance
 
 # The paper never states its DQN epsilon schedule; Sec. 5.2 says hyper-parameters
 # are "designed based on Hessel's, Mnih's, and Fortunato's algorithms", so the
-# DQN baseline follows Mnih et al. (2015): anneal epsilon 1.0 -> 0.1 during
-# training, and evaluate with epsilon = 0.05. Noisy agents evaluate with mean
-# weights (no noise), per Fortunato et al.
+# DQN baseline follows Mnih et al. (2015) LITERALLY: anneal epsilon 1.0 -> 0.1
+# over the first 1M frames, and evaluate with epsilon = 0.05. Under the 30K
+# training budget this means epsilon only reaches ~0.97 -- the agent learns
+# almost entirely off-policy from near-random behavior, which is the reading
+# that best explains the paper's DQN score (170.49 +/- 35.86). Noisy agents
+# evaluate with mean weights (no noise), per Fortunato et al.
 EPS_END = 0.1
+EPS_DECAY_STEPS = 1_000_000
 EVAL_EPS = 0.05
 
 
@@ -65,7 +69,7 @@ def run_training(mode, seed, budget_steps, lr, target_update, min_start, batch_s
     agent = DQNAgent(STATE_DIM, N_ACTIONS, mode=mode, arch="mlp",
                      lr=lr, gamma=0.99, target_update=target_update,
                      sigma_init=0.4, k_final=4.0, inf_R=INF_R, sup_R=SUP_R,
-                     eps_start=1.0, eps_end=EPS_END, eps_decay_steps=budget_steps)
+                     eps_start=1.0, eps_end=EPS_END, eps_decay_steps=EPS_DECAY_STEPS)
     buffer = ReplayBuffer(STATE_DIM, 1, max_size=10000)
 
     returns, sigmas = [], []
