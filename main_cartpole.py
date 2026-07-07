@@ -41,6 +41,14 @@ INF_R, SUP_R = 0.0, 200.0         # return range under the 200-step cap (online 
 SOLVED_THRESHOLD = 195.0          # OpenAI Gym's official "solved" bar for CartPole-v0
 EVAL_ROUNDS = 64                  # post-training evaluation rounds per instance (Sec. 5.3)
 
+# The paper never states its DQN epsilon schedule; Sec. 5.2 says hyper-parameters
+# are "designed based on Hessel's, Mnih's, and Fortunato's algorithms", so the
+# DQN baseline follows Mnih et al. (2015): anneal epsilon 1.0 -> 0.1 during
+# training, and evaluate with epsilon = 0.05. Noisy agents evaluate with mean
+# weights (no noise), per Fortunato et al.
+EPS_END = 0.1
+EVAL_EPS = 0.05
+
 
 def moving_average(data, window):
     data = np.asarray(data, dtype=float)
@@ -57,7 +65,7 @@ def run_training(mode, seed, budget_steps, lr, target_update, min_start, batch_s
     agent = DQNAgent(STATE_DIM, N_ACTIONS, mode=mode, arch="mlp",
                      lr=lr, gamma=0.99, target_update=target_update,
                      sigma_init=0.4, k_final=4.0, inf_R=INF_R, sup_R=SUP_R,
-                     eps_start=1.0, eps_end=0.02, eps_decay_steps=budget_steps)
+                     eps_start=1.0, eps_end=EPS_END, eps_decay_steps=budget_steps)
     buffer = ReplayBuffer(STATE_DIM, 1, max_size=10000)
 
     returns, sigmas = [], []
@@ -95,7 +103,10 @@ def run_training(mode, seed, budget_steps, lr, target_update, min_start, batch_s
         state = np.asarray(obs, dtype=np.float32)
         ep_ret = 0.0
         while True:
-            a = agent.select_action(state, explore=False)
+            if mode == "dqn" and np.random.rand() < EVAL_EPS:
+                a = np.random.randint(N_ACTIONS)     # Mnih's eval protocol
+            else:
+                a = agent.select_action(state, explore=False)
             nobs, r, term, trunc, _ = env.step(a)
             state = np.asarray(nobs, dtype=np.float32)
             ep_ret += r
