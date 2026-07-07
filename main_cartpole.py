@@ -39,6 +39,7 @@ MAX_EPISODE_STEPS = 200          # reproduces CartPole-v0's cap (paper Sec. 5.1)
 STATE_DIM, N_ACTIONS = 4, 2
 INF_R, SUP_R = 0.0, 200.0         # return range under the 200-step cap (online weight k)
 SOLVED_THRESHOLD = 195.0          # OpenAI Gym's official "solved" bar for CartPole-v0
+EVAL_ROUNDS = 64                  # post-training evaluation rounds per instance (Sec. 5.3)
 
 
 def moving_average(data, window):
@@ -85,9 +86,26 @@ def run_training(mode, seed, budget_steps, lr, target_update, min_start, batch_s
         sigmas.append(agent.noise_magnitude())
         ep += 1
 
+    # --- Evaluation, paper Sec. 5.3: after training, "each instance ran 64
+    # rounds. We calculated the average score of these 64 rounds as the score
+    # of the instance." No exploration during evaluation. --- #
+    eval_returns = []
+    for ev in range(EVAL_ROUNDS):
+        obs, _ = env.reset(seed=10_000 + seed * EVAL_ROUNDS + ev)
+        state = np.asarray(obs, dtype=np.float32)
+        ep_ret = 0.0
+        while True:
+            a = agent.select_action(state, explore=False)
+            nobs, r, term, trunc, _ = env.step(a)
+            state = np.asarray(nobs, dtype=np.float32)
+            ep_ret += r
+            if term or trunc:
+                break
+        eval_returns.append(ep_ret)
+
     pbar.close()
     env.close()
-    return {"returns": returns, "sigma": sigmas}
+    return {"returns": returns, "sigma": sigmas, "eval": eval_returns}
 
 
 def plot_comparison(agg, results_dir, ma_window, n_seeds):
@@ -137,7 +155,7 @@ def main():
 
     agg = {}
     for mode in ["dqn", "noisynet", "nrowan"]:
-        per_seed = {"returns": [], "sigma": []}
+        per_seed = {"returns": [], "sigma": [], "eval": []}
         for seed in SEEDS:
             print(f"\n=== Training [{mode}] seed={seed} for {BUDGET_STEPS} steps ===")
             res = run_training(mode, seed, BUDGET_STEPS, LR, TARGET_UPDATE,
@@ -147,16 +165,30 @@ def main():
         agg[mode] = per_seed         # ragged: episode count differs per seed
         for seed, r in zip(SEEDS, per_seed["returns"]):
             np.savetxt(os.path.join(results_dir, f"returns_{mode}_seed{seed}.txt"), r)
+        np.savetxt(os.path.join(results_dir, f"eval_{mode}.txt"),
+                   np.array(per_seed["eval"], dtype=float))
 
     plot_comparison(agg, results_dir, MA_WINDOW, len(SEEDS))
 
-    # --- SUMMARY: last-50-ep mean return, mean +/- std across the 5 seeds --- #
-    print(f"\n======== SUMMARY (last-50-ep mean return: mean +/- std over {len(SEEDS)} seeds) ========")
-    print(f"{'method':16s} {'return':>18s}")
+    # --- SUMMARY, paper Table 3 protocol (Sec. 5.3): score of an instance =
+    # mean of its 64 evaluation rounds; final score = mean over the 5
+    # instances; std computed "in a similar way" (per-instance std over the
+    # 64 rounds, averaged over instances). --- #
+    print(f"\n==== SUMMARY (Table 3 protocol: {EVAL_ROUNDS} eval rounds x {len(SEEDS)} instances) ====")
+    print(f"{'method':16s} {'score':>18s}    (paper: DQN 170.49+/-35.86 | "
+          f"NoisyNet 164.96+/-31.56 | NROWAN 187.04+/-13.99)")
     for mode in ["dqn", "noisynet", "nrowan"]:
-        r = np.array([np.mean(run[-50:]) for run in agg[mode]["returns"]])  # one value per seed
-        print(f"{mode:16s} {r.mean():8.1f} +/- {r.std():6.1f}")
+        ev = np.array(agg[mode]["eval"], dtype=float)       # [n_seeds, EVAL_ROUNDS]
+        score = ev.mean(axis=1).mean()                      # mean of instance means
+        std = ev.std(axis=1).mean()                         # mean of instance stds
+        print(f"{mode:16s} {score:8.2f} +/- {std:6.2f}")
     print("=============================================================================")
+
+    # secondary diagnostic: last-50 training-episode return per seed
+    print(f"\n-------- training-curve check (last-50-ep mean: mean +/- std over seeds) --------")
+    for mode in ["dqn", "noisynet", "nrowan"]:
+        r = np.array([np.mean(run[-50:]) for run in agg[mode]["returns"]])
+        print(f"{mode:16s} {r.mean():8.1f} +/- {r.std():6.1f}")
 
 
 if __name__ == "__main__":

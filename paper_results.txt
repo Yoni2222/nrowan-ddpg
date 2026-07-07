@@ -1,0 +1,93 @@
+===== PAGE 21 =====
+each instance ran 64 rounds. We calculated the average score of these 64 rounds
+as the score of the instance. Then we calculated the average score of these ﬁve in-
+stance as the ﬁnal score. The standard deviation of the scores were calculated in
+a similar way. NoisyNet-DQN reported in Table 3 uses online noise adjustment
+to decay the noise. As shown in Table 3, NROWAN-DQN scored an average
+of 187.04 in Cartpole, which is 16.56 higher than DQN, and 22.08 higher than
+NoisyNet-DQN, and the average standard deviation is nearly 3 times smaller
+than DQN and NoisyNet-DQN. In Pong, NROWAN-DQN has an average score
+of 18.80, which is 1.74 higher than DQN, 0.86 higher than NoisyNet-DQN, and
+the average standard deviation is 0.5 less than DQN, 0.2 less than NoisyNet-
+DQN. In MountainCar, NROWAN-DQN has an average score of -121.85, which
+is 10.05 higher than DQN, 6.52 higher than NoisyNet-DQN, and the average
+standard deviation is 1.21 less than DQN, 2.09 less than NoisyNet-DQN. In Ac-
+robot, NROWAN-DQN has an average score of -84.41, which is 2.83 higher than
+DQN, 2.16 higher than NoisyNet-DQN, and the average standard deviation is
+6.57 less than DQN, 13.74 less than NoisyNet-DQN. The results of these exper-
+iments show that NROWAN-DQN has more stable and higher performance.
+In Table 3, NoisyNet-DQN performs better than DQN in Pong, which is
+consistent with the experimental results of Fortunato et al. [31]. However,
+it is unexpected that NoisyNet-DQN scores less than DQN in Cartpole. After
+analyzing the experimental environment, we found it is because this environment
+is more sensitive to noise actions. In Cartpole, for example, when the pole tilts
+to left, moving the cart to the left due to noise is likely to cause the game to
+be lost. Other environment is less sensitive to noise action. For example, in
+Pong, when the racket can hit the ball in the original position, it is likely that
+agents will still be able to receive the ball when agents move it a little bit due to
+noise. What’s more, the large state-action space in Pong needs to be more fully
+explored for the environment. With better exploration mechanism, NoisyNet-
+DQN outperforms DQN. Because of NROWAN-DQN exploring more fully and
+mitigating the eﬀects of noise, it outperforms the other two algorithms in all
+environments.
+21
+
+===== PAGE 22 =====
+Table 3: Performance comparison
+Problem DQN NoisyNet-DQN NROWAN-DQN
+Cartpole 170.49 ±35.86 164.96 ±31.56 187.04±13.99
+Pong 17.07 ±3.36 17.95 ±3.08 18.81±2.87
+MountainCar -131.90 ±21.09 -128.37 ±21.97 -121.85±19.88
+Acrobot -87.24 ±22.33 -86.57 ±29.32 -84.41±15.58
+5.4. Score change in learning
+Figure 6 shows the average reward trend of NoisyNet-DQN and NROWAN-
+DQN in Cartpole, Pong, MountainCar and Acrobot. In Pong and MountainCar,
+NROWAN-DQN performs better than NoisyNet-DQN during the learning pro-
+cess. This is because the deterministic factor makes it easier for agents to form
+stable policies when learning. In Cartpole, NROWAN-DQN can eﬀectively learn
+in a noise sensitive environment, so its learning curve can converge to higher
+values. Since the Acrobot environment is simpler, both NROWAN-DQN and
+NoisyNet-DQN can learn quickly in this environment, and the learning curves of
+both can converge to approximately the same value, so it is diﬃcult to compare
+NROWAN-DQN and NoisyNet-DQN in this environment. But overall, we can
+conclude that the learning ability of NROWAN-DQN is better than NoisyNet-
+DQN.
+5.5. Final k value and learning rate
+Our algorithm introduces a new hyper-parameter kfinal, which indicates
+the ﬁnal value of k in the learning process. We analyzed the relationship be-
+tween kfinal and learning rate in the low-dimensional Cartpole environment,
+and tested the appropriate value of kfinal in the high-dimensional Pong envi-
+ronment.
+Because kfinal and learning rate jointly control the parameter update step
+size in the direction of generating a stable policy, kfinal should be adjusted
+along with the learning rate. Figures 7 - 9 show the learning curve of the
+22
+
+===== PAGE 23 =====
+(a) Cartpole
+ (b) Pong
+(c) MountainCar
+ (d) Acrobot
+Figure 6: Learning curves of NoisyNet-DQN and NROWAN-DQN in Cartpole, Pong,
+MountainCar and Acrobot
+agent in Cartpole with three diﬀerent learning rates and nine diﬀerent kfinal
+values. As we can see, too small kfinal will lead to instability, and the ﬁnal
+results have a large variance; too large kfinal will cause output actions of the
+agent to be too stable, resulting in a decline in the exploration ability, thus
+making the agent learn slower. Figure 10 shows score results with diﬀerent
+learning rates and diﬀerent kfinal values in Cartpole. The product of k and
+the learning rate controls the update step size of ▽σD in equation (10) during
+learning. More speciﬁcally, the learning rate controls the update step size, and
+k controls the proportion of updates in the TD-error gradient direction and
+in the▽σD direction. When kfinal and the learning rate are both small, the
+learning eﬃciency of the agent is low. When kfinal is large and the learning
+rate is small, the parameters of the agent is over-updated in the direction along
+which the stable action is generated. After repeated testing, we conclude that
+the large learning rate is not sensitive to the change of kfinal. When kfinal is
+23
+
+===== PAGE 24 =====
+Figure 7: Score results with diﬀerent kf inal in Cartpole when learning rate is 0.0001
+Figure 8: Score results with diﬀerent kf inal in Cartpole when learning rate is 0.000075
+24
+
