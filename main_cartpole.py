@@ -1,11 +1,17 @@
 """
-NROWAN-DQN reproduction on CartPole-v1 (one of the paper's four environments).
+NROWAN-DQN reproduction on CartPole (one of the paper's four environments).
 
 Compares the paper's three algorithms -- DQN, NoisyNet-DQN, NROWAN-DQN -- using
 the SAME NoisyLinear + noise-reduction machinery as the continuous experiments.
 This is the fast sanity check that our NROWAN implementation is correct: in the
 discrete regime it was designed for, NROWAN-DQN should match or beat DQN and
 show more stable learning (the paper's claims).
+
+The paper's own description of the environment ("...the game is over when the
+total reward reaches '+200'...", Sec. 5.1) matches CartPole-v0's 200-step cap,
+NOT CartPole-v1's 500-step cap. We reproduce that exact cap via
+gym.make(..., max_episode_steps=200) on top of CartPole-v1's physics (v0 and
+v1 share identical dynamics/reward; they differ only in the step cap).
 
 Hyperparameters match the paper's Table 1 ("Others" column) and Table 2
 ("Cartpole" column) exactly:
@@ -29,8 +35,10 @@ from agent.dqn_agent import DQNAgent
 from agent.memory import ReplayBuffer
 
 ENV_ID = "CartPole-v1"
+MAX_EPISODE_STEPS = 200          # reproduces CartPole-v0's cap (paper Sec. 5.1)
 STATE_DIM, N_ACTIONS = 4, 2
-INF_R, SUP_R = 0.0, 500.0        # CartPole-v1 return range (for online weight k)
+INF_R, SUP_R = 0.0, 200.0         # return range under the 200-step cap (online weight k)
+SOLVED_THRESHOLD = 195.0          # OpenAI Gym's official "solved" bar for CartPole-v0
 
 
 def moving_average(data, window):
@@ -44,7 +52,7 @@ def run_training(mode, seed, budget_steps, lr, target_update, min_start, batch_s
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    env = gym.make(ENV_ID)
+    env = gym.make(ENV_ID, max_episode_steps=MAX_EPISODE_STEPS)
     agent = DQNAgent(STATE_DIM, N_ACTIONS, mode=mode, arch="mlp",
                      lr=lr, gamma=0.99, target_update=target_update,
                      sigma_init=0.4, k_final=4.0, inf_R=INF_R, sup_R=SUP_R,
@@ -102,8 +110,9 @@ def plot_comparison(agg, results_dir, ma_window, n_seeds):
         x = np.arange(ma_window, ma_window + len(mean))
         plt.plot(x, mean, color=colors[mode], linewidth=2.5, label=labels[mode])
         plt.fill_between(x, mean - std, mean + std, color=colors[mode], alpha=0.18)
-    plt.axhline(475, color='black', linestyle='--', linewidth=1.2, label='solved (475)')
-    plt.title(f'CartPole-v1 return, {ma_window}-ep MA  [mean $\\pm$ std, {n_seeds} seeds]')
+    plt.axhline(SOLVED_THRESHOLD, color='black', linestyle='--', linewidth=1.2,
+               label=f'solved ({SOLVED_THRESHOLD:.0f})')
+    plt.title(f'CartPole (200-step cap) return, {ma_window}-ep MA  [mean $\\pm$ std, {n_seeds} seeds]')
     plt.xlabel('Episode'); plt.ylabel('Episode return')
     plt.legend(); plt.grid(True, linestyle='--', alpha=0.5)
     plt.tight_layout()
