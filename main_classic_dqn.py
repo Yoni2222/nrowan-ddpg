@@ -90,6 +90,7 @@ def run_training(cfg, mode, seed):
     buffer = ReplayBuffer(cfg["state_dim"], 1, max_size=10000)
 
     returns = []
+    train_successes = 0              # episodes that reached the goal (term=True)
     pbar = tqdm(total=BUDGET_STEPS, desc=f"{mode:8s} seed={seed}")
     ep = 0
     while agent.total_steps < BUDGET_STEPS:
@@ -108,12 +109,16 @@ def run_training(cfg, mode, seed):
                 agent.train(buffer, BATCH_SIZE)
             state = ns
             ep_ret += r
+            if term:
+                train_successes += 1
             if term or trunc or agent.total_steps >= BUDGET_STEPS:
                 break
         agent.end_episode()
         returns.append(ep_ret)
         ep += 1
     pbar.close()
+    print(f"    [{mode} seed={seed}] training: {ep} episodes, "
+          f"{train_successes} reached the goal", flush=True)
 
     # --- Evaluation, paper Sec. 5.3: 64 rounds, no exploration. DQN keeps
     # Mnih's eval epsilon of 0.05; noisy agents act on mean weights. --- #
@@ -165,43 +170,59 @@ def plot_comparison(agg, results_dir, env_name):
     print(f"=> Comparison graph saved to: {path}")
 
 
-def run_env(name):
+def run_env(name, modes, seeds):
     cfg = ENVS[name]
     results_dir = f"results_{name}"
     os.makedirs(results_dir, exist_ok=True)
 
     agg = {}
-    for mode in ["dqn", "noisynet", "nrowan"]:
+    for mode in modes:
         per_seed = {"returns": [], "eval": []}
-        for seed in SEEDS:
+        for seed in seeds:
             print(f"\n=== [{name}] Training [{mode}] seed={seed} for {BUDGET_STEPS} steps ===")
             res = run_training(cfg, mode, seed)
             for key in per_seed:
                 per_seed[key].append(res[key])
         agg[mode] = per_seed
-        for seed, r in zip(SEEDS, per_seed["returns"]):
+        for seed, r in zip(seeds, per_seed["returns"]):
             np.savetxt(os.path.join(results_dir, f"returns_{mode}_seed{seed}.txt"), r)
         np.savetxt(os.path.join(results_dir, f"eval_{mode}.txt"),
                    np.array(per_seed["eval"], dtype=float))
 
-    plot_comparison(agg, results_dir, name)
+    if len(modes) == 3:
+        plot_comparison(agg, results_dir, name)
 
     print(f"\n==== [{name}] SUMMARY (Table 3 protocol: {EVAL_ROUNDS} eval rounds x "
-          f"{len(SEEDS)} instances) ====")
+          f"{len(seeds)} instances, budget={BUDGET_STEPS}) ====")
     print(f"paper: {cfg['paper']}")
-    for mode in ["dqn", "noisynet", "nrowan"]:
+    for mode in modes:
         ev = np.array(agg[mode]["eval"], dtype=float)
         print(f"{mode:16s} {ev.mean(axis=1).mean():8.2f} +/- {ev.std(axis=1).mean():6.2f}")
     print("=" * 77)
 
 
 def main():
+    global BUDGET_STEPS, EPS_DECAY_STEPS
     ap = argparse.ArgumentParser()
     ap.add_argument("--env", default="both",
                     choices=["mountaincar", "acrobot", "both"])
+    ap.add_argument("--budget", type=int, default=BUDGET_STEPS,
+                    help="training budget in env steps (paper states 30K only "
+                         "for CartPole/Pong; unstated for these two envs)")
+    ap.add_argument("--modes", default="dqn,noisynet,nrowan",
+                    help="comma list of algorithms to run")
+    ap.add_argument("--seeds", default="0,1,2,3,4",
+                    help="comma list of seeds (paper: 5 instances)")
+    ap.add_argument("--eps-decay-steps", type=int, default=EPS_DECAY_STEPS,
+                    help="DQN epsilon anneal horizon (default: Mnih's 1M)")
     args = ap.parse_args()
+
+    BUDGET_STEPS = args.budget
+    EPS_DECAY_STEPS = args.eps_decay_steps
+    modes = args.modes.split(",")
+    seeds = [int(s) for s in args.seeds.split(",")]
     for name in (["mountaincar", "acrobot"] if args.env == "both" else [args.env]):
-        run_env(name)
+        run_env(name, modes, seeds)
 
 
 if __name__ == "__main__":
