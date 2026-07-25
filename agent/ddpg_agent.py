@@ -11,18 +11,31 @@ class DDPGAgent:
                  sigma_init=0.5, xi_max=1.0, mode="nrowan",
                  expl_noise=0.2, expl_noise_decay=0.99, expl_noise_min=0.02):
         """
-        mode = "nrowan"  -> our method: NoisyLinear actor + noise-reduction loss D
-                            + online weight adjustment (exploration inside the net)
-        mode = "vanilla" -> classic DDPG baseline: deterministic actor + decaying
-                            Gaussian action-space noise, no D, no online weight
+        mode = "nrowan"     -> our method: NoisyLinear actor + noise-reduction
+                               loss D + online weight adjustment (exploration
+                               inside the net). The policy loss is computed
+                               through the NOISY forward pass, so sigma receives
+                               gradients from BOTH the policy loss and D.
+        mode = "nrowan_iso" -> gradient-isolated variant: identical to "nrowan"
+                               EXCEPT the policy loss is computed through the
+                               mean-only (noise-free) forward pass, so sigma is
+                               invisible to the policy gradient and receives its
+                               gradient from the D penalty ALONE. This removes
+                               the mechanism by which Q-maximization suppresses
+                               the exploration noise (sigma), making the learned
+                               parameter noise as suppression-proof as vanilla's
+                               external action noise.
+        mode = "vanilla"    -> classic DDPG baseline: deterministic actor +
+                               decaying Gaussian action-space noise, no D, no
+                               online weight
         """
-        assert mode in ("nrowan", "vanilla")
+        assert mode in ("nrowan", "nrowan_iso", "vanilla")
         self.mode = mode
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.discount = discount
         self.tau = tau
 
-        noisy = (mode == "nrowan")
+        noisy = (mode != "vanilla")
         self.actor = Actor(state_dim, action_dim, max_action,
                            sigma_init=sigma_init, noisy=noisy).to(self.device)
         self.actor_target = copy.deepcopy(self.actor)
@@ -49,10 +62,10 @@ class DDPGAgent:
     def select_action(self, state, explore=True):
         state = torch.FloatTensor(state.reshape(1, -1)).to(self.device)
 
-        if self.mode == "nrowan":
-            # Exploration lives in the noisy weights. For acting we use the
-            # BEHAVIORAL noise (frozen for the whole episode -> coherent,
-            # directed exploration). eval() -> deterministic policy (means only).
+        if self.mode != "vanilla":
+            # nrowan / nrowan_iso: exploration lives in the noisy weights. For
+            # acting we use the BEHAVIORAL noise (frozen for the whole episode
+            # -> coherent, directed exploration). eval() -> means only.
             if explore:
                 self.actor.train()
                 self.actor.set_behavioral(True)
@@ -74,14 +87,14 @@ class DDPGAgent:
     def reset_exploration_noise(self):
         """NROWAN: sample one fresh BEHAVIORAL perturbation for the actor at the
         START of each episode (coherent, directed exploration). No-op for vanilla."""
-        if self.mode == "nrowan":
+        if self.mode != "vanilla":
             self.actor.train()
             self.actor.reset_behavioral_noise()
 
     def update_noise_weight(self, episode_reward):
-        """Per-episode update. NROWAN: recompute xi from recent performance.
-        Vanilla: decay the Gaussian action-noise std."""
-        if self.mode == "nrowan":
+        """Per-episode update. NROWAN modes: recompute xi from recent
+        performance. Vanilla: decay the Gaussian action-noise std."""
+        if self.mode != "vanilla":
             self.noise_weight = self.online_adjuster.update(episode_reward)
         else:
             self.expl_noise = max(self.expl_noise_min,
@@ -122,13 +135,25 @@ class DDPGAgent:
         self.critic_optimizer.step()
 
         # ---------------------- ACTOR UPDATE ---------------------- #
-        # Use freshly resampled TRAINING noise (NOT the frozen behavioral noise)
-        # so the policy loss is an expectation over noise and sigma receives a
-        # proper gradient. The per-episode behavioral noise used for acting is
-        # left untouched -> coherent exploration AND learnable sigma coexist.
-        self.actor.set_behavioral(False)
-        self.actor.reset_noise()
-        policy_loss = -self.critic(state, self.actor(state)).mean()
+        if self.mode == "nrowan_iso":
+            # GRADIENT ISOLATION: compute the policy loss through the MEAN-ONLY
+            # forward pass (eval mode -> weight = mu, sigma absent from the
+            # graph). mu still learns to maximize Q as usual, but sigma is
+            # invisible to the policy gradient, so Q-maximization cannot
+            # suppress the exploration noise. Sigma's ONLY gradient source is
+            # the D penalty below, scheduled by the online weight xi.
+            self.actor.eval()
+            policy_loss = -self.critic(state, self.actor(state)).mean()
+            self.actor.train()
+        else:
+            # Original NROWAN transfer: freshly resampled TRAINING noise (NOT
+            # the frozen behavioral noise) so the policy loss is an expectation
+            # over noise and sigma receives a policy gradient as well. The
+            # per-episode behavioral noise used for acting is left untouched
+            # -> coherent exploration AND learnable sigma coexist.
+            self.actor.set_behavioral(False)
+            self.actor.reset_noise()
+            policy_loss = -self.critic(state, self.actor(state)).mean()
 
         # NROWAN noise-reduction loss D, weighted by the online xi
         noise_loss = self.actor.noise_loss()

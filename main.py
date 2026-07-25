@@ -1,3 +1,4 @@
+import argparse
 import os
 import grid2op
 import numpy as np
@@ -122,11 +123,16 @@ def run_training(env, mode, seed, redisp_mask, ramp_up, state_dim, action_dim,
     return agent, {"lengths": ep_lengths, "violations": ep_violations, "rewards": ep_rewards}
 
 
+COLORS = {"nrowan": "green", "nrowan_iso": "royalblue", "vanilla": "darkorange"}
+LABELS = {"nrowan": "NROWAN-DDPG (original transfer)",
+          "nrowan_iso": "NROWAN-DDPG-ISO (gradient-isolated, ours)",
+          "vanilla": "Vanilla DDPG"}
+
+
 def plot_comparison(agg, donothing, results_dir, ma_window):
     """agg[mode][key] is a 2D array [n_seeds, n_episodes]. Plots mean +/- std band."""
     dn_len, dn_viol = donothing
-    colors = {"nrowan": "green", "vanilla": "darkorange"}
-    labels = {"nrowan": "NROWAN-DDPG (ours)", "vanilla": "Vanilla DDPG"}
+    colors, labels = COLORS, LABELS
 
     def smoothed_mean_std(arr):
         # smooth each seed, then take mean/std across seeds
@@ -173,6 +179,14 @@ def plot_comparison(agg, donothing, results_dir, ma_window):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--modes", default="nrowan,nrowan_iso,vanilla",
+                    help="comma list of agent variants to train: any of "
+                         "nrowan (original transfer), nrowan_iso "
+                         "(gradient-isolated policy loss), vanilla")
+    args = ap.parse_args()
+    modes = args.modes.split(",")
+
     models_dir, results_dir = get_save_paths()
 
     print("Initializing Grid2Op environment...")
@@ -201,7 +215,7 @@ def main():
     print(f"   do-nothing: mean length={donothing[0]:.1f} | mean violations={donothing[1]:.2f}")
 
     agg = {}
-    for mode in ["nrowan", "vanilla"]:
+    for mode in modes:
         per_seed = {"lengths": [], "violations": [], "rewards": []}
         for seed in SEEDS:
             print(f"\n=== Training [{mode}] seed={seed} for {MAX_EPISODES} episodes ===")
@@ -225,7 +239,7 @@ def main():
     print("\n========== SUMMARY (last-30-ep averages: mean +/- std over 3 seeds) ==========")
     print(f"{'method':14s} {'survival':>20s} {'violations':>20s}")
     print(f"{'do-nothing':14s} {donothing[0]:13.1f}{'':7s} {donothing[1]:13.2f}")
-    for mode in ["nrowan", "vanilla"]:
+    for mode in modes:
         l = agg[mode]["lengths"][:, -30:].mean(axis=1)       # one value per seed
         v = agg[mode]["violations"][:, -30:].mean(axis=1)
         print(f"{mode:14s} {l.mean():8.1f} +/- {l.std():6.1f}  {v.mean():8.2f} +/- {v.std():6.2f}")

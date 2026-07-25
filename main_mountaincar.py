@@ -15,6 +15,7 @@ that discovers the goal.
 The agent/network/noise code is reused UNCHANGED from the grid2op experiment;
 only the environment loop differs.
 """
+import argparse
 import os
 import math
 import numpy as np
@@ -139,10 +140,15 @@ def run_training(mode, seed, state_dim, action_dim, max_action,
                    "lengths": ep_lengths, "sigma": ep_sigma}
 
 
+COLORS = {"nrowan": "green", "nrowan_iso": "royalblue", "vanilla": "darkorange"}
+LABELS = {"nrowan": "NROWAN-DDPG (original transfer)",
+          "nrowan_iso": "NROWAN-DDPG-ISO (gradient-isolated, ours)",
+          "vanilla": "Vanilla DDPG"}
+
+
 def plot_comparison(agg, results_dir, ma_window):
     """agg[mode][key] is a 2D array [n_seeds, n_episodes]."""
-    colors = {"nrowan": "green", "vanilla": "darkorange"}
-    labels = {"nrowan": "NROWAN-DDPG (ours)", "vanilla": "Vanilla DDPG"}
+    colors, labels = COLORS, LABELS
 
     plt.figure(figsize=(14, 5))
 
@@ -189,6 +195,22 @@ def plot_comparison(agg, results_dir, ma_window):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--modes", default="nrowan,nrowan_iso,vanilla",
+                    help="comma list of agent variants to train: any of "
+                         "nrowan (original transfer), nrowan_iso "
+                         "(gradient-isolated policy loss), vanilla")
+    ap.add_argument("--shaping", choices=["on", "off"], default="on",
+                    help="on (default): potential-based reward shaping -- a "
+                         "tractable regime where all methods can learn. "
+                         "off: the PURE SPARSE hard-exploration task (+100 "
+                         "only at the goal) where external action noise is "
+                         "expected to fail and coherent parameter noise to win")
+    args = ap.parse_args()
+    modes = args.modes.split(",")
+    use_shaping = (args.shaping == "on")
+    print(f"Reward shaping: {'ON' if use_shaping else 'OFF (pure sparse)'}")
+
     models_dir, results_dir = get_save_paths()
 
     state_dim = 2
@@ -203,21 +225,19 @@ def main():
     XI_MAX = 0.5
     SEEDS = [0, 1, 2]       # multi-seed for a robust claim
     MA_WINDOW = 10
-    USE_SHAPING = True      # potential-based shaping (identical for both methods,
-                            # provably policy-invariant): a tractable regime where
-                            # BOTH methods learn, so we can compare success AND
-                            # stability. (Pure sparse, USE_SHAPING=False, is a
-                            # do-nothing trap here -> both fail; see report.)
+    # Reward shaping is controlled by the --shaping CLI flag (see above):
+    # potential-based shaping is identical for all methods and provably
+    # policy-invariant; "off" is the pure-sparse hard-exploration regime.
 
     agg = {}
-    for mode in ["nrowan", "vanilla"]:
+    for mode in modes:
         per_seed = {"rewards": [], "solved": [], "lengths": [], "sigma": []}
         for seed in SEEDS:
             print(f"\n=== Training [{mode}] seed={seed} for {MAX_EPISODES} episodes ===")
             agent, res = run_training(
                 mode, seed, state_dim, action_dim, max_action,
                 MAX_EPISODES, WARMUP_STEPS, BATCH_SIZE, SIGMA_INIT, XI_MAX,
-                use_shaping=USE_SHAPING)
+                use_shaping=use_shaping)
             for k in per_seed:
                 per_seed[k].append(res[k])
             torch.save(agent.actor.state_dict(),
@@ -234,7 +254,7 @@ def main():
     # MEAN +/- STD across the 3 seeds (robust, honest comparison). --- #
     print("\n========== SUMMARY (last-30-ep averages: mean +/- std over 3 seeds) ==========")
     print(f"{'method':12s} {'reward':>16s} {'success%':>16s} {'len':>14s}")
-    for mode in ["nrowan", "vanilla"]:
+    for mode in modes:
         r = agg[mode]["rewards"][:, -30:].mean(axis=1)      # one value per seed
         s = agg[mode]["solved"][:, -30:].mean(axis=1) * 100
         l = agg[mode]["lengths"][:, -30:].mean(axis=1)
@@ -242,12 +262,16 @@ def main():
               f"{s.mean():7.1f} +/- {s.std():5.1f} {l.mean():6.0f} +/- {l.std():4.0f}")
     print("=============================================================================")
 
-    # --- sigma diagnostic: confirm NROWAN's output-layer noise is LEARNED
-    # (rises while exploring) and then anneals, rather than collapsing at once. --- #
-    sig = agg["nrowan"]["sigma"]   # [seeds, episodes]
-    print("\n--- NROWAN output-layer sigma (mean over seeds) ---")
-    print(f"  init={sig[:, 0].mean():.4f}  max={sig.mean(axis=0).max():.4f}  "
-          f"final={sig[:, -1].mean():.4f}")
+    # --- sigma diagnostic: the KEY mechanism measurement. Under "nrowan" the
+    # policy gradient can suppress sigma; under "nrowan_iso" it cannot, so
+    # sigma should stay near its init until xi anneals it. --- #
+    for mode in modes:
+        if mode == "vanilla":
+            continue
+        sig = agg[mode]["sigma"]   # [seeds, episodes]
+        print(f"\n--- [{mode}] output-layer sigma (mean over seeds) ---")
+        print(f"  init={sig[:, 0].mean():.4f}  max={sig.mean(axis=0).max():.4f}  "
+              f"final={sig[:, -1].mean():.4f}")
     print("==========================================================================")
 
 

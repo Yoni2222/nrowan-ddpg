@@ -19,6 +19,7 @@ cannot sustain the detour.
 The agent / network / noise code is reused UNCHANGED; only the env loop differs.
 Runs 3 seeds per method and reports mean +/- standard deviation.
 """
+import argparse
 import os
 import numpy as np
 import torch
@@ -113,10 +114,15 @@ def run_training(mode, seed, state_dim, action_dim, max_action,
     return agent, {"rewards": ep_rewards, "solved": ep_solved, "lengths": ep_lengths}
 
 
+COLORS = {"nrowan": "green", "nrowan_iso": "royalblue", "vanilla": "darkorange"}
+LABELS = {"nrowan": "NROWAN-DDPG (original transfer)",
+          "nrowan_iso": "NROWAN-DDPG-ISO (gradient-isolated, ours)",
+          "vanilla": "Vanilla DDPG"}
+
+
 def plot_comparison(agg, results_dir, ma_window):
     """agg[mode][key] is a 2D array [n_seeds, n_episodes]. Plots mean +/- std band."""
-    colors = {"nrowan": "green", "vanilla": "darkorange"}
-    labels = {"nrowan": "NROWAN-DDPG (ours)", "vanilla": "Vanilla DDPG"}
+    colors, labels = COLORS, LABELS
 
     def smoothed_mean_std(arr):
         # smooth each seed, then take mean/std across seeds
@@ -156,6 +162,14 @@ def plot_comparison(agg, results_dir, ma_window):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--modes", default="nrowan,nrowan_iso,vanilla",
+                    help="comma list of agent variants to train: any of "
+                         "nrowan (original transfer), nrowan_iso "
+                         "(gradient-isolated policy loss), vanilla")
+    args = ap.parse_args()
+    modes = args.modes.split(",")
+
     results_dir = "results_pointmaze"
     os.makedirs(results_dir, exist_ok=True)
 
@@ -177,7 +191,7 @@ def main():
     MA_WINDOW = 10
 
     agg = {}
-    for mode in ["nrowan", "vanilla"]:
+    for mode in modes:
         per_seed = {"rewards": [], "solved": [], "lengths": []}
         for seed in SEEDS:
             print(f"\n=== Training [{mode}] seed={seed} for {MAX_EPISODES} episodes ===")
@@ -194,7 +208,7 @@ def main():
     # --- Final verdict: mean +/- std across the 3 seeds (last-30-episode averages) --- #
     print("\n========= SUMMARY (last-30-ep averages: mean +/- std over 3 seeds) =========")
     print(f"{'method':18s} {'success%':>16s} {'steps':>16s}")
-    for mode in ["nrowan", "vanilla"]:
+    for mode in modes:
         s_per_seed = agg[mode]["solved"][:, -30:].mean(axis=1) * 100   # one number per seed
         l_per_seed = agg[mode]["lengths"][:, -30:].mean(axis=1)
         print(f"{mode:18s} {s_per_seed.mean():7.1f} +/- {s_per_seed.std():5.1f}    "
