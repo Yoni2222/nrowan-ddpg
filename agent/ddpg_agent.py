@@ -9,7 +9,8 @@ from agent.noise import OnlineWeightAdjuster
 class DDPGAgent:
     def __init__(self, state_dim, action_dim, max_action, discount=0.99, tau=0.001,
                  sigma_init=0.5, xi_max=1.0, mode="nrowan",
-                 expl_noise=0.2, expl_noise_decay=0.99, expl_noise_min=0.02):
+                 expl_noise=0.2, expl_noise_decay=0.99, expl_noise_min=0.02,
+                 xi_inf_R=None, xi_sup_R=None):
         """
         mode = "nrowan"     -> our method: NoisyLinear actor + noise-reduction
                                loss D + online weight adjustment (exploration
@@ -46,8 +47,11 @@ class DDPGAgent:
         self.critic_target = copy.deepcopy(self.critic)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=1e-3)
 
-        # NROWAN online weight adjustment for the noise-reduction loss D
-        self.online_adjuster = OnlineWeightAdjuster(xi_max=xi_max)
+        # NROWAN online weight adjustment for the noise-reduction loss D.
+        # With xi_inf_R/xi_sup_R given, uses the paper's eq. 12 (known fixed
+        # bounds); otherwise online min/max normalization.
+        self.online_adjuster = OnlineWeightAdjuster(xi_max=xi_max,
+                                                    inf_R=xi_inf_R, sup_R=xi_sup_R)
         self.noise_weight = 0.0   # xi, updated once per episode (nrowan only)
 
         # Vanilla-baseline Gaussian action-noise schedule (ignored in nrowan mode)

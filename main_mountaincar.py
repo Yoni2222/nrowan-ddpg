@@ -73,8 +73,11 @@ def run_training(mode, seed, state_dim, action_dim, max_action,
     torch.manual_seed(seed)
 
     env = gym.make("MountainCarContinuous-v0")
+    # xi is driven by the success indicator (0/1), so its bounds are KNOWN:
+    # paper eq. 12 with inf_R=0, sup_R=1 -> xi proportional to success rate.
     agent = DDPGAgent(state_dim, action_dim, max_action,
-                      sigma_init=sigma_init, xi_max=xi_max, mode=mode)
+                      sigma_init=sigma_init, xi_max=xi_max, mode=mode,
+                      xi_inf_R=0.0, xi_sup_R=1.0)
     replay_buffer = ReplayBuffer(state_dim, action_dim)
 
     ep_rewards, ep_solved, ep_lengths, ep_sigma = [], [], [], []
@@ -200,6 +203,9 @@ def main():
                     help="comma list of agent variants to train: any of "
                          "nrowan (original transfer), nrowan_iso "
                          "(gradient-isolated policy loss), vanilla")
+    ap.add_argument("--episodes", type=int, default=150,
+                    help="training episodes per seed (sparse runs need more: "
+                         "the lone seed-0 success arrived at episode 91 of 150)")
     ap.add_argument("--shaping", choices=["on", "off"], default="on",
                     help="on (default): potential-based reward shaping -- a "
                          "tractable regime where all methods can learn. "
@@ -218,7 +224,7 @@ def main():
     max_action = 1.0
 
     # --- Experiment configuration --- #
-    MAX_EPISODES = 150
+    MAX_EPISODES = args.episodes
     BATCH_SIZE = 128
     WARMUP_STEPS = 1000
     SIGMA_INIT = 1.5        # stronger parameter noise: enough to crest the hill

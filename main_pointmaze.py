@@ -64,8 +64,11 @@ def run_training(mode, seed, state_dim, action_dim, max_action,
     torch.manual_seed(seed)
 
     env = make_env()
+    # xi is driven by the success indicator (0/1), so its bounds are KNOWN:
+    # paper eq. 12 with inf_R=0, sup_R=1 -> xi proportional to success rate.
     agent = DDPGAgent(state_dim, action_dim, max_action,
-                      sigma_init=sigma_init, xi_max=xi_max, mode=mode)
+                      sigma_init=sigma_init, xi_max=xi_max, mode=mode,
+                      xi_inf_R=0.0, xi_sup_R=1.0)
     replay_buffer = ReplayBuffer(state_dim, action_dim)
 
     ep_rewards, ep_solved, ep_lengths = [], [], []
