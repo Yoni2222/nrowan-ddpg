@@ -66,7 +66,7 @@ def moving_average(data, window):
 
 def run_training(mode, seed, state_dim, action_dim, max_action,
                  n_episodes, warmup_steps, batch_size, sigma_init, xi_max,
-                 use_shaping=True):
+                 use_shaping=True, noise_decay=0.99):
     """Train one agent (mode='nrowan' or 'vanilla') on a single seed and return
     per-episode metrics: reward, solved (reached goal), length (steps)."""
     np.random.seed(seed)
@@ -77,7 +77,8 @@ def run_training(mode, seed, state_dim, action_dim, max_action,
     # paper eq. 12 with inf_R=0, sup_R=1 -> xi proportional to success rate.
     agent = DDPGAgent(state_dim, action_dim, max_action,
                       sigma_init=sigma_init, xi_max=xi_max, mode=mode,
-                      xi_inf_R=0.0, xi_sup_R=1.0)
+                      xi_inf_R=0.0, xi_sup_R=1.0,
+                      expl_noise_decay=noise_decay)
     replay_buffer = ReplayBuffer(state_dim, action_dim)
 
     ep_rewards, ep_solved, ep_lengths, ep_sigma = [], [], [], []
@@ -203,6 +204,11 @@ def main():
                     help="comma list of agent variants to train: any of "
                          "nrowan (original transfer), nrowan_iso "
                          "(gradient-isolated policy loss), vanilla")
+    ap.add_argument("--noise-decay", type=float, default=0.99,
+                    help="per-episode decay of vanilla's Gaussian action noise. "
+                         "1.0 = no decay (fair baseline: vanilla keeps exploring "
+                         "as long as the noisy agents do). Default 0.99 reaches "
+                         "the 0.02 floor by ~episode 230. Ignored by nrowan modes")
     ap.add_argument("--episodes", type=int, default=150,
                     help="training episodes per seed (sparse runs need more: "
                          "the lone seed-0 success arrived at episode 91 of 150)")
@@ -243,7 +249,7 @@ def main():
             agent, res = run_training(
                 mode, seed, state_dim, action_dim, max_action,
                 MAX_EPISODES, WARMUP_STEPS, BATCH_SIZE, SIGMA_INIT, XI_MAX,
-                use_shaping=use_shaping)
+                use_shaping=use_shaping, noise_decay=args.noise_decay)
             for k in per_seed:
                 per_seed[k].append(res[k])
             torch.save(agent.actor.state_dict(),

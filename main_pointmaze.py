@@ -57,7 +57,8 @@ def moving_average(data, window):
 
 
 def run_training(mode, seed, state_dim, action_dim, max_action,
-                 n_episodes, warmup_steps, batch_size, sigma_init, xi_max):
+                 n_episodes, warmup_steps, batch_size, sigma_init, xi_max,
+                 noise_decay=0.99):
     """Train one agent (mode='nrowan' or 'vanilla') on a single seed.
     Returns per-episode metrics: reward, solved (reached goal), length (steps)."""
     np.random.seed(seed)
@@ -68,10 +69,11 @@ def run_training(mode, seed, state_dim, action_dim, max_action,
     # paper eq. 12 with inf_R=0, sup_R=1 -> xi proportional to success rate.
     agent = DDPGAgent(state_dim, action_dim, max_action,
                       sigma_init=sigma_init, xi_max=xi_max, mode=mode,
-                      xi_inf_R=0.0, xi_sup_R=1.0)
+                      xi_inf_R=0.0, xi_sup_R=1.0,
+                      expl_noise_decay=noise_decay)
     replay_buffer = ReplayBuffer(state_dim, action_dim)
 
-    ep_rewards, ep_solved, ep_lengths = [], [], []
+    ep_rewards, ep_solved, ep_lengths, ep_sigma = [], [], [], []
     total_steps = 0
 
     for episode in tqdm(range(n_episodes), desc=f"{mode:7s} seed={seed}"):
@@ -110,11 +112,13 @@ def run_training(mode, seed, state_dim, action_dim, max_action,
         ep_rewards.append(ep_reward)
         ep_solved.append(solved)
         ep_lengths.append(length)
+        ep_sigma.append(agent.noise_magnitude())   # output-layer sigma diagnostic
         # xi gated on success (keeps exploration ON until the goal is found)
         agent.update_noise_weight(float(solved))
 
     env.close()
-    return agent, {"rewards": ep_rewards, "solved": ep_solved, "lengths": ep_lengths}
+    return agent, {"rewards": ep_rewards, "solved": ep_solved,
+                   "lengths": ep_lengths, "sigma": ep_sigma}
 
 
 COLORS = {"nrowan": "green", "nrowan_iso": "royalblue", "vanilla": "darkorange"}
@@ -166,6 +170,11 @@ def plot_comparison(agg, results_dir, ma_window):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--noise-decay", type=float, default=0.99,
+                    help="per-episode decay of vanilla's Gaussian action noise. "
+                         "1.0 = no decay (fair baseline: vanilla keeps exploring "
+                         "as long as the noisy agents do). Default 0.99 reaches "
+                         "the 0.02 floor by ~episode 230. Ignored by nrowan modes")
     ap.add_argument("--modes", default="nrowan,nrowan_iso,vanilla",
                     help="comma list of agent variants to train: any of "
                          "nrowan (original transfer), nrowan_iso "
@@ -195,15 +204,16 @@ def main():
 
     agg = {}
     for mode in modes:
-        per_seed = {"rewards": [], "solved": [], "lengths": []}
+        per_seed = {"rewards": [], "solved": [], "lengths": [], "sigma": []}
         for seed in SEEDS:
             print(f"\n=== Training [{mode}] seed={seed} for {MAX_EPISODES} episodes ===")
             _, res = run_training(mode, seed, state_dim, action_dim, max_action,
-                                  MAX_EPISODES, WARMUP_STEPS, BATCH_SIZE, SIGMA_INIT, XI_MAX)
+                                  MAX_EPISODES, WARMUP_STEPS, BATCH_SIZE, SIGMA_INIT,
+                                  XI_MAX, noise_decay=args.noise_decay)
             for k in per_seed:
                 per_seed[k].append(res[k])
         agg[mode] = {k: np.array(v, dtype=float) for k, v in per_seed.items()}
-        for k in ["rewards", "solved", "lengths"]:
+        for k in ["rewards", "solved", "lengths", "sigma"]:
             np.savetxt(os.path.join(results_dir, f"{k}_{mode}.txt"), agg[mode][k])
 
     plot_comparison(agg, results_dir, MA_WINDOW)
@@ -217,6 +227,17 @@ def main():
         print(f"{mode:18s} {s_per_seed.mean():7.1f} +/- {s_per_seed.std():5.1f}    "
               f"{l_per_seed.mean():7.1f} +/- {l_per_seed.std():5.1f}")
     print("============================================================================")
+
+    # --- sigma diagnostic: the KEY mechanism measurement. Under "nrowan" the
+    # policy gradient can suppress sigma; under "nrowan_iso" it cannot, so sigma
+    # should hold near its init until sustained success anneals it. --- #
+    for mode in modes:
+        if mode == "vanilla":
+            continue
+        sig = agg[mode]["sigma"]   # [seeds, episodes]
+        print(f"\n--- [{mode}] output-layer sigma (mean over seeds) ---")
+        print(f"  init={sig[:, 0].mean():.4f}  max={sig.mean(axis=0).max():.4f}  "
+              f"final={sig[:, -1].mean():.4f}")
 
 
 if __name__ == "__main__":
