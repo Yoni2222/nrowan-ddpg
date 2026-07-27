@@ -168,6 +168,41 @@ def plot_comparison(agg, results_dir, ma_window):
     print(f"=> Comparison graph saved to: {path}")
 
 
+METRICS = ["rewards", "solved", "lengths", "sigma"]
+
+
+def get_results_dir():
+    """Prefer Google Drive so results survive a Colab disconnect / VM reset."""
+    drive = '/content/drive/MyDrive/'
+    if os.path.exists(drive):
+        print("Google Drive detected: results will sync to cloud.")
+        results_dir = os.path.join(drive, 'NROWAN_DDPG_Project', 'results_pointmaze')
+    else:
+        print("Google Drive not found: saving to the local project directory.")
+        results_dir = "results_pointmaze"
+    os.makedirs(results_dir, exist_ok=True)
+    return results_dir
+
+
+def seed_file(results_dir, mode, seed):
+    return os.path.join(results_dir, f"run_{mode}_seed{seed}.npz")
+
+
+def save_seed(results_dir, mode, seed, res):
+    """Checkpoint ONE (mode, seed) immediately, so an interruption costs at most
+    a single seed instead of a whole mode."""
+    np.savez(seed_file(results_dir, mode, seed),
+             **{k: np.asarray(res[k], dtype=float) for k in METRICS})
+
+
+def load_seed(results_dir, mode, seed):
+    path = seed_file(results_dir, mode, seed)
+    if not os.path.exists(path):
+        return None
+    with np.load(path) as z:
+        return {k: z[k] for k in METRICS}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--noise-decay", type=float, default=0.99,
@@ -179,11 +214,17 @@ def main():
                     help="comma list of agent variants to train: any of "
                          "nrowan (original transfer), nrowan_iso "
                          "(gradient-isolated policy loss), vanilla")
+    ap.add_argument("--seeds", default="0,1,2",
+                    help="comma list of seeds")
+    ap.add_argument("--resume", action="store_true",
+                    help="skip any (mode, seed) that already has a saved "
+                         "checkpoint, and reuse it for the final summary. Use "
+                         "this to continue after a disconnect")
     args = ap.parse_args()
     modes = args.modes.split(",")
+    seeds = [int(s) for s in args.seeds.split(",")]
 
-    results_dir = "results_pointmaze"
-    os.makedirs(results_dir, exist_ok=True)
+    results_dir = get_results_dir()
 
     # discover dims from the env
     env = make_env()
@@ -199,27 +240,32 @@ def main():
     WARMUP_STEPS = 1000
     SIGMA_INIT = 0.5
     XI_MAX = 0.5
-    SEEDS = [0, 1, 2]
     MA_WINDOW = 10
 
     agg = {}
     for mode in modes:
-        per_seed = {"rewards": [], "solved": [], "lengths": [], "sigma": []}
-        for seed in SEEDS:
-            print(f"\n=== Training [{mode}] seed={seed} for {MAX_EPISODES} episodes ===")
-            _, res = run_training(mode, seed, state_dim, action_dim, max_action,
-                                  MAX_EPISODES, WARMUP_STEPS, BATCH_SIZE, SIGMA_INIT,
-                                  XI_MAX, noise_decay=args.noise_decay)
+        per_seed = {k: [] for k in METRICS}
+        for seed in seeds:
+            cached = load_seed(results_dir, mode, seed) if args.resume else None
+            if cached is not None:
+                print(f"--- [{mode}] seed={seed}: reusing saved checkpoint ---")
+                res = cached
+            else:
+                print(f"\n=== Training [{mode}] seed={seed} for {MAX_EPISODES} episodes ===")
+                _, res = run_training(mode, seed, state_dim, action_dim, max_action,
+                                      MAX_EPISODES, WARMUP_STEPS, BATCH_SIZE, SIGMA_INIT,
+                                      XI_MAX, noise_decay=args.noise_decay)
+                save_seed(results_dir, mode, seed, res)
             for k in per_seed:
                 per_seed[k].append(res[k])
         agg[mode] = {k: np.array(v, dtype=float) for k, v in per_seed.items()}
-        for k in ["rewards", "solved", "lengths", "sigma"]:
+        for k in METRICS:
             np.savetxt(os.path.join(results_dir, f"{k}_{mode}.txt"), agg[mode][k])
 
     plot_comparison(agg, results_dir, MA_WINDOW)
 
     # --- Final verdict: mean +/- std across the 3 seeds (last-30-episode averages) --- #
-    print("\n========= SUMMARY (last-30-ep averages: mean +/- std over 3 seeds) =========")
+    print(f"\n===== SUMMARY (last-30-ep averages: mean +/- std over {len(seeds)} seeds) =====")
     print(f"{'method':18s} {'success%':>16s} {'steps':>16s}")
     for mode in modes:
         s_per_seed = agg[mode]["solved"][:, -30:].mean(axis=1) * 100   # one number per seed
