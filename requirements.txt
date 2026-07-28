@@ -11,7 +11,14 @@ gymnasium
 grid2op                 # main.py
 gymnasium-robotics      # main_pointmaze.py
 mujoco                  # main_pointmaze.py
-CityLearn               # main_citylearn.py
+
+# CityLearn (main_citylearn.py) is deliberately NOT listed here.
+# CityLearn 2.5.0 pins scikit-learn<=1.2.2, numpy<2.0.0 and gymnasium<=0.28.1.
+# The scikit-learn pin has no wheels for modern Python so pip tries to build it
+# from source and fails, and the gymnasium/numpy pins would DOWNGRADE the stack
+# the other experiments depend on. Install it in a SEPARATE session only:
+#   pip install CityLearn==2.6.0b2      # newer beta, may have relaxed pins
+# Do not install it alongside the PointMaze / grid2op runs.
 
 # Pong / Atari (main_pong.py) -- large download, install only when needed:
 #   pip install "gymnasium[atari,accept-rom-license]" ale-py
