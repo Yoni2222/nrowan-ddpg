@@ -1,7 +1,17 @@
-grid2op
 torch
 numpy
 matplotlib
 tensorboard
-gymnasium
 tqdm
+
+# Discrete reproduction: main_cartpole.py, main_classic_dqn.py
+gymnasium
+
+# Continuous experiments
+grid2op                 # main.py
+gymnasium-robotics      # main_pointmaze.py
+mujoco                  # main_pointmaze.py
+CityLearn               # main_citylearn.py
+
+# Pong / Atari (main_pong.py) -- large download, install only when needed:
+#   pip install "gymnasium[atari,accept-rom-license]" ale-py
