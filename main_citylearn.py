@@ -269,7 +269,11 @@ def main():
     results_dir = get_results_dir()
 
     BATCH_SIZE = 128
-    WARMUP_STEPS = 500 if args.smoke else 2000
+    # Smoke mode must actually REACH the training path: warmup has to end well
+    # before the run does (2 episodes x 200 steps = 400 steps total), otherwise
+    # every mode just replays the same random warmup actions and a dimension
+    # mismatch in train() would go unnoticed until the real run.
+    WARMUP_STEPS = 100 if args.smoke else 2000
     SIGMA_INIT = 0.5
     XI_MAX = 0.5
     MA_WINDOW = 1 if args.smoke else 5
