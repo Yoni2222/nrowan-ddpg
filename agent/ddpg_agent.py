@@ -10,7 +10,8 @@ class DDPGAgent:
     def __init__(self, state_dim, action_dim, max_action, discount=0.99, tau=0.001,
                  sigma_init=0.5, xi_max=1.0, mode="nrowan",
                  expl_noise=0.2, expl_noise_decay=0.99, expl_noise_min=0.02,
-                 xi_inf_R=None, xi_sup_R=None):
+                 xi_inf_R=None, xi_sup_R=None,
+                 sigma_optimizer="adam", sigma_floor=0.0):
         """
         mode = "nrowan"     -> our method: NoisyLinear actor + noise-reduction
                                loss D + online weight adjustment (exploration
@@ -29,9 +30,33 @@ class DDPGAgent:
         mode = "vanilla"    -> classic DDPG baseline: deterministic actor +
                                decaying Gaussian action-space noise, no D, no
                                online weight
+
+        Two independent knobs on how sigma is allowed to decay (both default to
+        the original behavior, so existing results stay reproducible):
+
+        sigma_optimizer = "adam" -> original. Adam normalizes each gradient by
+                               its own running magnitude (step ~ lr * g/|g|),
+                               so the D penalty's tiny but perfectly consistent
+                               downward gradient still moves sigma a full lr per
+                               step. Measured: sigma dies within ~440 updates
+                               (< 1 episode) regardless of how small xi is.
+        sigma_optimizer = "sgd"  -> the fix: sigma parameters get a plain SGD
+                               optimizer (step = lr * g, NOT normalized) while
+                               mu and the rest keep Adam. Sigma's decay becomes
+                               proportional to xi again, i.e. the gradual,
+                               competence-gated annealing the paper intended.
+
+        sigma_floor = 0.0    -> original: sigma may reach exactly 0, after which
+                               it can never recover (the |sigma| gradient is 0
+                               there and nothing pushes it back up).
+        sigma_floor > 0      -> clamp every sigma to at least this value after
+                               each update, guaranteeing a residual amount of
+                               exploration noise for the whole run.
         """
         assert mode in ("nrowan", "nrowan_iso", "vanilla")
+        assert sigma_optimizer in ("adam", "sgd")
         self.mode = mode
+        self.sigma_floor = float(sigma_floor)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.discount = discount
         self.tau = tau
@@ -40,7 +65,18 @@ class DDPGAgent:
         self.actor = Actor(state_dim, action_dim, max_action,
                            sigma_init=sigma_init, noisy=noisy).to(self.device)
         self.actor_target = copy.deepcopy(self.actor)
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
+
+        # Optionally split sigma off onto a NON-normalizing optimizer, so the D
+        # penalty anneals it proportionally instead of at a fixed lr per step.
+        self.sigma_params = [p for n, p in self.actor.named_parameters()
+                             if 'sigma' in n] if noisy else []
+        if noisy and sigma_optimizer == "sgd" and self.sigma_params:
+            other = [p for n, p in self.actor.named_parameters() if 'sigma' not in n]
+            self.actor_optimizer = torch.optim.Adam(other, lr=1e-4)
+            self.sigma_optimizer = torch.optim.SGD(self.sigma_params, lr=1e-4)
+        else:
+            self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
+            self.sigma_optimizer = None
 
         # Critic (faster learning rate to guide the actor)
         self.critic = Critic(state_dim, action_dim).to(self.device)
@@ -105,6 +141,16 @@ class DDPGAgent:
                                   self.expl_noise * self.expl_noise_decay)
         return self.noise_weight
 
+    def _apply_sigma_floor(self):
+        """Keep every sigma at or above sigma_floor. Also prevents sigma from
+        crossing into negative values, where |sigma| would start pushing it
+        further away from zero."""
+        if self.sigma_floor <= 0.0 or not self.sigma_params:
+            return
+        with torch.no_grad():
+            for p in self.sigma_params:
+                p.clamp_(min=self.sigma_floor)
+
     def noise_magnitude(self):
         """Current output-layer noise level (mean |sigma|), for diagnostics.
         Should RISE while exploring, then anneal as the policy stabilizes."""
@@ -164,11 +210,16 @@ class DDPGAgent:
         actor_loss = policy_loss + self.noise_weight * noise_loss
 
         self.actor_optimizer.zero_grad()
+        if self.sigma_optimizer is not None:
+            self.sigma_optimizer.zero_grad()
         actor_loss.backward()
 
         # --- PROTECTION A: Gradient Clipping for Actor ---
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
         self.actor_optimizer.step()
+        if self.sigma_optimizer is not None:
+            self.sigma_optimizer.step()
+        self._apply_sigma_floor()
 
         # ------------------- TARGET NETWORKS UPDATE ------------------- #
         for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):

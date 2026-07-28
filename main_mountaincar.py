@@ -66,7 +66,8 @@ def moving_average(data, window):
 
 def run_training(mode, seed, state_dim, action_dim, max_action,
                  n_episodes, warmup_steps, batch_size, sigma_init, xi_max,
-                 use_shaping=True, noise_decay=0.99):
+                 use_shaping=True, noise_decay=0.99,
+                 sigma_optimizer="adam", sigma_floor=0.0):
     """Train one agent (mode='nrowan' or 'vanilla') on a single seed and return
     per-episode metrics: reward, solved (reached goal), length (steps)."""
     np.random.seed(seed)
@@ -78,7 +79,8 @@ def run_training(mode, seed, state_dim, action_dim, max_action,
     agent = DDPGAgent(state_dim, action_dim, max_action,
                       sigma_init=sigma_init, xi_max=xi_max, mode=mode,
                       xi_inf_R=0.0, xi_sup_R=1.0,
-                      expl_noise_decay=noise_decay)
+                      expl_noise_decay=noise_decay,
+                      sigma_optimizer=sigma_optimizer, sigma_floor=sigma_floor)
     replay_buffer = ReplayBuffer(state_dim, action_dim)
 
     ep_rewards, ep_solved, ep_lengths, ep_sigma = [], [], [], []
@@ -163,7 +165,10 @@ def plot_comparison(agg, results_dir, ma_window):
         mean = rewards.mean(axis=0)
         ep = np.arange(1, len(mean) + 1)
         ma = moving_average(mean, ma_window)
-        ma_x = np.arange(ma_window, len(mean) + 1)
+        # moving_average returns the input unchanged when it is shorter than the
+        # window, so derive x from the SMOOTHED length rather than assuming the
+        # window was applied (otherwise short runs crash on a length mismatch).
+        ma_x = np.arange(len(mean) - len(ma) + 1, len(mean) + 1)
         # per-seed faint lines for transparency
         for s in range(rewards.shape[0]):
             plt.plot(ep, rewards[s], color=colors[mode], alpha=0.10)
@@ -182,7 +187,10 @@ def plot_comparison(agg, results_dir, ma_window):
         solved = data["solved"]                   # [seeds, episodes]
         mean = solved.mean(axis=0)
         ma = moving_average(mean, ma_window)
-        ma_x = np.arange(ma_window, len(mean) + 1)
+        # moving_average returns the input unchanged when it is shorter than the
+        # window, so derive x from the SMOOTHED length rather than assuming the
+        # window was applied (otherwise short runs crash on a length mismatch).
+        ma_x = np.arange(len(mean) - len(ma) + 1, len(mean) + 1)
         plt.plot(ma_x, ma, color=colors[mode], linewidth=2.5, label=labels[mode])
     plt.title(f'Success rate (reached goal), {ma_window}-ep moving avg')
     plt.xlabel('Episode')
@@ -209,6 +217,16 @@ def main():
                          "1.0 = no decay (fair baseline: vanilla keeps exploring "
                          "as long as the noisy agents do). Default 0.99 reaches "
                          "the 0.02 floor by ~episode 230. Ignored by nrowan modes")
+    ap.add_argument("--sigma-optimizer", choices=["adam", "sgd"], default="adam",
+                    help="adam (default, original): Adam normalizes the D "
+                         "penalty's gradient, so sigma collapses within ~440 "
+                         "updates however small xi is. sgd: sigma gets a plain "
+                         "non-normalizing optimizer, restoring the gradual, "
+                         "competence-gated annealing the paper intended")
+    ap.add_argument("--sigma-floor", type=float, default=0.0,
+                    help="clamp every sigma to at least this value after each "
+                         "update (0 = off)")
+    ap.add_argument("--seeds", default="0,1,2", help="comma list of seeds")
     ap.add_argument("--episodes", type=int, default=150,
                     help="training episodes per seed (sparse runs need more: "
                          "the lone seed-0 success arrived at episode 91 of 150)")
@@ -220,8 +238,22 @@ def main():
                          "expected to fail and coherent parameter noise to win")
     args = ap.parse_args()
     modes = args.modes.split(",")
+    seeds = [int(s) for s in args.seeds.split(",")]
     use_shaping = (args.shaping == "on")
     print(f"Reward shaping: {'ON' if use_shaping else 'OFF (pure sparse)'}")
+
+    # Tag non-default sigma configs so their result files never overwrite or get
+    # confused with the default-config runs.
+    tag_parts = []
+    if args.sigma_optimizer != "adam":
+        tag_parts.append(f"sig{args.sigma_optimizer}")
+    if args.sigma_floor > 0:
+        tag_parts.append(f"floor{args.sigma_floor:g}")
+    if args.noise_decay != 0.99:
+        tag_parts.append(f"nd{args.noise_decay:g}")
+    tag = ("_" + "_".join(tag_parts)) if tag_parts else ""
+    if tag:
+        print(f"Non-default config -> results tagged '{tag}'")
 
     models_dir, results_dir = get_save_paths()
 
@@ -235,7 +267,7 @@ def main():
     WARMUP_STEPS = 1000
     SIGMA_INIT = 1.5        # stronger parameter noise: enough to crest the hill
     XI_MAX = 0.5
-    SEEDS = [0, 1, 2]       # multi-seed for a robust claim
+    SEEDS = seeds           # from --seeds
     MA_WINDOW = 10
     # Reward shaping is controlled by the --shaping CLI flag (see above):
     # potential-based shaping is identical for all methods and provably
@@ -249,22 +281,22 @@ def main():
             agent, res = run_training(
                 mode, seed, state_dim, action_dim, max_action,
                 MAX_EPISODES, WARMUP_STEPS, BATCH_SIZE, SIGMA_INIT, XI_MAX,
-                use_shaping=use_shaping, noise_decay=args.noise_decay)
+                use_shaping=use_shaping, noise_decay=args.noise_decay,
+                sigma_optimizer=args.sigma_optimizer, sigma_floor=args.sigma_floor)
             for k in per_seed:
                 per_seed[k].append(res[k])
             torch.save(agent.actor.state_dict(),
-                       os.path.join(models_dir, f'actor_{mode}_seed{seed}.pth'))
+                       os.path.join(models_dir, f'actor_{mode}{tag}_seed{seed}.pth'))
 
         agg[mode] = {k: np.array(v, dtype=float) for k, v in per_seed.items()}
-        np.savetxt(os.path.join(results_dir, f"rewards_{mode}.txt"), agg[mode]["rewards"])
-        np.savetxt(os.path.join(results_dir, f"solved_{mode}.txt"), agg[mode]["solved"])
-        np.savetxt(os.path.join(results_dir, f"lengths_{mode}.txt"), agg[mode]["lengths"])
+        for k in ["rewards", "solved", "lengths", "sigma"]:
+            np.savetxt(os.path.join(results_dir, f"{k}_{mode}{tag}.txt"), agg[mode][k])
 
     plot_comparison(agg, results_dir, MA_WINDOW)
 
     # --- Final verdict summary: per-seed last-30-ep averages, then report the
-    # MEAN +/- STD across the 3 seeds (robust, honest comparison). --- #
-    print("\n========== SUMMARY (last-30-ep averages: mean +/- std over 3 seeds) ==========")
+    # MEAN +/- STD across the seeds (robust, honest comparison). --- #
+    print(f"\n===== SUMMARY (last-30-ep averages: mean +/- std over {len(SEEDS)} seeds) =====")
     print(f"{'method':12s} {'reward':>16s} {'success%':>16s} {'len':>14s}")
     for mode in modes:
         r = agg[mode]["rewards"][:, -30:].mean(axis=1)      # one value per seed

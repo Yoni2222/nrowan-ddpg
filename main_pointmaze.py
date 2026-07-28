@@ -58,7 +58,7 @@ def moving_average(data, window):
 
 def run_training(mode, seed, state_dim, action_dim, max_action,
                  n_episodes, warmup_steps, batch_size, sigma_init, xi_max,
-                 noise_decay=0.99):
+                 noise_decay=0.99, sigma_optimizer="adam", sigma_floor=0.0):
     """Train one agent (mode='nrowan' or 'vanilla') on a single seed.
     Returns per-episode metrics: reward, solved (reached goal), length (steps)."""
     np.random.seed(seed)
@@ -70,7 +70,8 @@ def run_training(mode, seed, state_dim, action_dim, max_action,
     agent = DDPGAgent(state_dim, action_dim, max_action,
                       sigma_init=sigma_init, xi_max=xi_max, mode=mode,
                       xi_inf_R=0.0, xi_sup_R=1.0,
-                      expl_noise_decay=noise_decay)
+                      expl_noise_decay=noise_decay,
+                      sigma_optimizer=sigma_optimizer, sigma_floor=sigma_floor)
     replay_buffer = ReplayBuffer(state_dim, action_dim)
 
     ep_rewards, ep_solved, ep_lengths, ep_sigma = [], [], [], []
@@ -184,19 +185,32 @@ def get_results_dir():
     return results_dir
 
 
-def seed_file(results_dir, mode, seed):
-    return os.path.join(results_dir, f"run_{mode}_seed{seed}.npz")
+def config_tag(args):
+    """Distinguish runs that differ in sigma handling, so their checkpoints and
+    result files never collide with the default-config ones."""
+    parts = []
+    if args.sigma_optimizer != "adam":
+        parts.append(f"sig{args.sigma_optimizer}")
+    if args.sigma_floor > 0:
+        parts.append(f"floor{args.sigma_floor:g}")
+    if args.noise_decay != 0.99:
+        parts.append(f"nd{args.noise_decay:g}")
+    return ("_" + "_".join(parts)) if parts else ""
 
 
-def save_seed(results_dir, mode, seed, res):
+def seed_file(results_dir, mode, seed, tag=""):
+    return os.path.join(results_dir, f"run_{mode}{tag}_seed{seed}.npz")
+
+
+def save_seed(results_dir, mode, seed, res, tag=""):
     """Checkpoint ONE (mode, seed) immediately, so an interruption costs at most
     a single seed instead of a whole mode."""
-    np.savez(seed_file(results_dir, mode, seed),
+    np.savez(seed_file(results_dir, mode, seed, tag),
              **{k: np.asarray(res[k], dtype=float) for k in METRICS})
 
 
-def load_seed(results_dir, mode, seed):
-    path = seed_file(results_dir, mode, seed)
+def load_seed(results_dir, mode, seed, tag=""):
+    path = seed_file(results_dir, mode, seed, tag)
     if not os.path.exists(path):
         return None
     with np.load(path) as z:
@@ -216,6 +230,19 @@ def main():
                          "(gradient-isolated policy loss), vanilla")
     ap.add_argument("--seeds", default="0,1,2",
                     help="comma list of seeds")
+    ap.add_argument("--episodes", type=int, default=200,
+                    help="training episodes per seed")
+    ap.add_argument("--sigma-optimizer", choices=["adam", "sgd"], default="adam",
+                    help="adam (default, original): Adam normalizes the D "
+                         "penalty's gradient, so sigma collapses within ~440 "
+                         "updates however small xi is. sgd: sigma gets a plain "
+                         "non-normalizing optimizer, restoring the gradual, "
+                         "competence-gated annealing the paper intended")
+    ap.add_argument("--sigma-floor", type=float, default=0.0,
+                    help="clamp every sigma to at least this value after each "
+                         "update (0 = off). Guarantees residual exploration "
+                         "noise and stops sigma reaching 0, from which it can "
+                         "never recover")
     ap.add_argument("--resume", action="store_true",
                     help="skip any (mode, seed) that already has a saved "
                          "checkpoint, and reuse it for the final summary. Use "
@@ -235,18 +262,23 @@ def main():
     env.close()
     print(f"state_dim={state_dim}  action_dim={action_dim}  max_action={max_action}")
 
-    MAX_EPISODES = 200
+    MAX_EPISODES = args.episodes
     BATCH_SIZE = 128
     WARMUP_STEPS = 1000
     SIGMA_INIT = 0.5
     XI_MAX = 0.5
     MA_WINDOW = 10
 
+    tag = config_tag(args)
+    if tag:
+        print(f"Non-default sigma config -> results tagged '{tag}' "
+              f"(kept separate from the default-config runs)")
+
     agg = {}
     for mode in modes:
         per_seed = {k: [] for k in METRICS}
         for seed in seeds:
-            cached = load_seed(results_dir, mode, seed) if args.resume else None
+            cached = load_seed(results_dir, mode, seed, tag) if args.resume else None
             if cached is not None:
                 print(f"--- [{mode}] seed={seed}: reusing saved checkpoint ---")
                 res = cached
@@ -254,13 +286,15 @@ def main():
                 print(f"\n=== Training [{mode}] seed={seed} for {MAX_EPISODES} episodes ===")
                 _, res = run_training(mode, seed, state_dim, action_dim, max_action,
                                       MAX_EPISODES, WARMUP_STEPS, BATCH_SIZE, SIGMA_INIT,
-                                      XI_MAX, noise_decay=args.noise_decay)
-                save_seed(results_dir, mode, seed, res)
+                                      XI_MAX, noise_decay=args.noise_decay,
+                                      sigma_optimizer=args.sigma_optimizer,
+                                      sigma_floor=args.sigma_floor)
+                save_seed(results_dir, mode, seed, res, tag)
             for k in per_seed:
                 per_seed[k].append(res[k])
         agg[mode] = {k: np.array(v, dtype=float) for k, v in per_seed.items()}
         for k in METRICS:
-            np.savetxt(os.path.join(results_dir, f"{k}_{mode}.txt"), agg[mode][k])
+            np.savetxt(os.path.join(results_dir, f"{k}_{mode}{tag}.txt"), agg[mode][k])
 
     plot_comparison(agg, results_dir, MA_WINDOW)
 
